@@ -19,11 +19,8 @@ def _env_config(tmp_path, monkeypatch):
 
 @pytest.mark.asyncio
 @patch("mysql_mcp_server.server.connect")
-@patch("mysql_mcp_server.server.get_db_config")
-async def test_call_tool_describe_formatting(mock_get_config, mock_connect):
+async def test_call_tool_describe_formatting(mock_connect):
     """Test that DESCRIBE queries are formatted correctly with NULL handling."""
-    mock_get_config.return_value = {"database": "test_db"}
-    
     # Mock cursor behavior
     mock_cursor = MagicMock()
     mock_cursor.description = [("Field",), ("Type",), ("Null",)]
@@ -52,11 +49,8 @@ async def test_call_tool_describe_formatting(mock_get_config, mock_connect):
 
 @pytest.mark.asyncio
 @patch("mysql_mcp_server.server.connect")
-@patch("mysql_mcp_server.server.get_db_config")
-async def test_call_tool_empty_results(mock_get_config, mock_connect):
+async def test_call_tool_empty_results(mock_connect):
     """Test handling of queries that return no results."""
-    mock_get_config.return_value = {"database": "test_db"}
-    
     mock_cursor = MagicMock()
     mock_cursor.description = [("id",)]
     mock_cursor.fetchall.return_value = []
@@ -73,12 +67,10 @@ async def test_call_tool_empty_results(mock_get_config, mock_connect):
 
 @pytest.mark.asyncio
 @patch("mysql_mcp_server.server.connect")
-@patch("mysql_mcp_server.server.get_db_config")
-async def test_call_tool_show_tables(mock_get_config, mock_connect, monkeypatch):
+async def test_call_tool_show_tables(mock_connect, monkeypatch):
     """Test SHOW TABLES formatting."""
     monkeypatch.setenv("MYSQL_DATABASE", "test_db")
-    mock_get_config.return_value = {"database": "test_db"}
-    
+
     mock_cursor = MagicMock()
     mock_cursor.fetchall.return_value = [("users",), ("orders",)]
     
@@ -96,14 +88,12 @@ async def test_call_tool_show_tables(mock_get_config, mock_connect, monkeypatch)
 
 @pytest.mark.asyncio
 @patch("mysql_mcp_server.server.connect")
-@patch("mysql_mcp_server.server.get_db_config")
-async def test_list_resources_identifier_safe(mock_get_config, mock_connect, monkeypatch):
+async def test_list_resources_identifier_safe(mock_connect, monkeypatch):
     """Test that resources have identifier-safe names for strict LLMs (Issue #39)."""
     from mysql_mcp_server.server import list_resources
 
     # Mock for single-database mode
     monkeypatch.setenv("MYSQL_DATABASE", "test_db")
-    mock_get_config.return_value = {"database": "test_db", "user": "u", "password": "p"}
     mock_cursor = MagicMock()
     mock_cursor.fetchall.return_value = [("users",), ("products",)]
     
@@ -122,13 +112,12 @@ async def test_list_resources_identifier_safe(mock_get_config, mock_connect, mon
 
 @pytest.mark.asyncio
 @patch("mysql_mcp_server.server.connect")
-@patch("mysql_mcp_server.server.get_db_config")
-async def test_list_resources_multi_db_safe(mock_get_config, mock_connect):
+async def test_list_resources_multi_db_safe(mock_connect, monkeypatch):
     """Test that database resources have identifier-safe names."""
     from mysql_mcp_server.server import list_resources
-    
-    # Mock for multi-database mode (no "database" in config)
-    mock_get_config.return_value = {"user": "u", "password": "p"}
+
+    # Multi-database mode: no MYSQL_DATABASE in env entry
+    monkeypatch.delenv("MYSQL_DATABASE", raising=False)
     mock_cursor = MagicMock()
     mock_cursor.fetchall.return_value = [("db1",), ("db2",), ("information_schema",)]
     

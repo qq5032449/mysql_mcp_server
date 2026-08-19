@@ -1,7 +1,7 @@
 import pytest
 from unittest.mock import patch, MagicMock
 from mysql_mcp_server import db_config
-from mysql_mcp_server.server import app, list_tools, list_prompts, get_prompt, list_resources, read_resource, call_tool, validate_identifier, parse_table_arg, get_db_config
+from mysql_mcp_server.server import app, list_tools, list_prompts, get_prompt, list_resources, read_resource, call_tool, validate_identifier, parse_table_arg
 from pydantic import AnyUrl
 
 
@@ -56,45 +56,6 @@ def test_validate_identifier_invalid():
         validate_identifier("users'--")
     with pytest.raises(ValueError, match="Invalid identifier"):
         validate_identifier("users`inject")
-
-
-def test_get_db_config_optional_database(monkeypatch):
-    """Test that MYSQL_DATABASE is optional."""
-    monkeypatch.setenv("MYSQL_USER", "testuser")
-    monkeypatch.setenv("MYSQL_PASSWORD", "testpass")
-    monkeypatch.delenv("MYSQL_DATABASE", raising=False)
-
-    config = get_db_config()
-    assert "database" not in config
-    assert config["user"] == "testuser"
-
-
-def test_get_db_config_with_database(monkeypatch):
-    """Test that MYSQL_DATABASE is included when set."""
-    monkeypatch.setenv("MYSQL_USER", "testuser")
-    monkeypatch.setenv("MYSQL_PASSWORD", "testpass")
-    monkeypatch.setenv("MYSQL_DATABASE", "mydb")
-
-    config = get_db_config()
-    assert config["database"] == "mydb"
-
-
-def test_get_db_config_missing_user(monkeypatch):
-    """Test that missing MYSQL_USER raises ValueError."""
-    monkeypatch.delenv("MYSQL_USER", raising=False)
-    monkeypatch.setenv("MYSQL_PASSWORD", "testpass")
-
-    with pytest.raises(ValueError, match="Missing required database configuration"):
-        get_db_config()
-
-
-def test_get_db_config_missing_password(monkeypatch):
-    """Test that missing MYSQL_PASSWORD raises ValueError."""
-    monkeypatch.setenv("MYSQL_USER", "testuser")
-    monkeypatch.delenv("MYSQL_PASSWORD", raising=False)
-
-    with pytest.raises(ValueError, match="Missing required database configuration"):
-        get_db_config()
 
 
 @pytest.mark.asyncio

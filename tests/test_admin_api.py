@@ -69,6 +69,16 @@ class TestOnChange:
         assert "ssh 端口" in r.json()["error"]
 
 
+class TestRegisterDedup:
+    def test_register_same_callback_twice_called_once(self, client, no_env):
+        calls = []
+        cb = lambda alias: calls.append(alias)
+        admin_api.register_on_change(cb)
+        admin_api.register_on_change(cb)
+        client.post("/api/databases", json=payload("dbX"))
+        assert calls == ["dbX"]
+
+
 class TestMiddleware:
     def test_static_files_guarded(self, app, no_env):
         # static 目录暂不存在，但守卫应在 404 之前拦截
@@ -154,6 +164,15 @@ class TestSettings:
     def test_set_default_missing_alias_400(self, client, no_env):
         client.post("/api/databases", json=payload("db1"))
         assert client.put("/api/settings", json={"default_alias": "zzz"}).status_code == 400
+
+    def test_set_default_notifies_change(self, client, no_env):
+        client.post("/api/databases", json=payload("db1"))
+        client.post("/api/databases", json=payload("db2"))
+        calls = []
+        admin_api.register_on_change(lambda alias: calls.append(alias))
+        r = client.put("/api/settings", json={"default_alias": "db2"})
+        assert r.status_code == 200
+        assert calls == ["db2"]
 
 
 class TestConnection:

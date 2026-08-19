@@ -31,8 +31,9 @@ _on_change_callbacks = []
 
 
 def register_on_change(cb) -> None:
-    """注册配置变更回调 cb(alias: str)。"""
-    _on_change_callbacks.append(cb)
+    """注册配置变更回调 cb(alias: str)；同一回调重复注册只保留一份。"""
+    if cb not in _on_change_callbacks:
+        _on_change_callbacks.append(cb)
 
 
 def _notify_changed(alias: str) -> None:
@@ -168,6 +169,7 @@ async def update_settings(request: Request):
         return JSONResponse({"error": f"别名 {alias} 不存在"}, status_code=400)
     cfg["default_alias"] = alias
     db_config.save_config(cfg)
+    _notify_changed(alias)
     return JSONResponse({"ok": True, "default_alias": alias})
 
 
