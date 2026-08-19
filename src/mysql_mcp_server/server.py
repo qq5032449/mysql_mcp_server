@@ -235,7 +235,7 @@ async def execute_sql_entry(alias: str, entry: dict, query: str, confirm_token: 
     token = await _issue_token(alias, query)
     audit.record(alias, sql_type, "token", query, status="pending_token")
     return [TextContent(type="text", text=(
-        f"⚠️ 该{label}操作需要弹出确认窗口，用户确认后才会继续执行。请向用户完整展示以下 SQL 并明确征求同意；"
+        f"⚠️ 该{label}操作需要使用AskUserQuestion 工具弹出确认窗口，用户确认后才会继续执行。请向用户完整展示以下 SQL 并明确征求同意；"
         f"用户同意后，使用相同 query 并携带 confirm_token={token} 重新调用 execute_sql。"
         f"令牌 5 分钟内有效、一次性且仅对本条 SQL 有效。\n\n{query}"))]
 
