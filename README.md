@@ -2,112 +2,111 @@
 [![PyPI - Downloads](https://img.shields.io/pypi/dm/mysql-mcp-server)](https://pypi.org/project/mysql-mcp-server/)
 [![AgentAudit Safe](https://img.shields.io/badge/AgentAudit-safe-brightgreen)](https://www.agentaudit.dev/packages/mysql-mcp-server)
 # MySQL MCP Server
-A Model Context Protocol (MCP) implementation that enables secure interaction with MySQL databases. This server component facilitates communication between AI applications (hosts/clients) and MySQL databases, making database exploration and analysis safer and more structured through a controlled interface.
+一个模型上下文协议（Model Context Protocol，MCP）实现，支持与 MySQL 数据库的安全交互。该服务端组件在 AI 应用（宿主/客户端）与 MySQL 数据库之间建立通信，通过受控接口让数据库的探索与分析更安全、更结构化。
 
-> **Note**: MySQL MCP Server supports both standard input/output (STDIO) and Streamable HTTP (SSE) transport modes. The SSE mode is recommended for remote/self-hosted deployments.
+> **注意**：MySQL MCP Server 同时支持标准输入输出（STDIO）与 Streamable HTTP（SSE）两种传输模式。远程/自托管部署推荐使用 SSE 模式。
 
-## Deployment options
-- **Hosted** — [Fronteir AI](https://fronteir.ai/mcp/designcomputer-mysql-mcp-server) runs the server for you; no local setup required.
-- **Local** — [Smithery](https://smithery.ai/server/designcomputer/mysql-mcp-server) installs and runs the server on your own machine.
+## 部署方式
+- **托管** — [Fronteir AI](https://fronteir.ai/mcp/designcomputer-mysql-mcp-server) 为你运行服务端，无需本地配置。
+- **本地** — [Smithery](https://smithery.ai/server/designcomputer/mysql-mcp-server) 在你自己的机器上安装并运行服务端。
 
-## Features
-- List available MySQL tables as resources
-- Read table contents
-- Execute SQL queries with proper error handling
-- **Multi-database mode** (Optional `MYSQL_DATABASE`)
-- **SSE/HTTP transport support** (`MCP_TRANSPORT=sse`)
-- **SSH Tunneling support**
-- **Comprehensive schema information**
-- **Table data sampling**
-- Secure database access through environment variables
-- Comprehensive logging
+## 功能特性
+- 以资源（resources）形式列出可用的 MySQL 表
+- 读取表内容
+- 执行 SQL 查询，并带有完善的错误处理
+- **多数据库模式**（可选 `MYSQL_DATABASE`）
+- **SSE/HTTP 传输支持**（`MCP_TRANSPORT=sse`）
+- **SSH 隧道支持**
+- **完整的表结构信息**
+- **表数据采样**
+- 通过环境变量安全地访问数据库
+- 完善的日志记录
 
-## Installation
-### Manual Installation
+## 安装
+### 手动安装
 ```bash
 pip install mysql-mcp-server
 ```
 
-### Installing via Smithery
-To install MySQL MCP Server for Claude Desktop automatically via [Smithery](https://smithery.ai/server/designcomputer/mysql-mcp-server):
+### 通过 Smithery 安装
+使用 [Smithery](https://smithery.ai/server/designcomputer/mysql-mcp-server) 为 Claude Desktop 自动安装 MySQL MCP Server：
 ```bash
 npx -y @smithery/cli install designcomputer/mysql-mcp-server --client claude
 ```
 
-### Installing via Claude Code CLI
+### 通过 Claude Code CLI 安装
 ```bash
 claude mcp add --transport stdio designcomputer-mysql_mcp_server uvx mysql_mcp_server
 ```
 
-### Installing via Autohand Code CLI
+### 通过 Autohand Code CLI 安装
 ```bash
 autohand mcp add mysql env MYSQL_HOST=localhost MYSQL_PORT=3306 MYSQL_USER=your_username MYSQL_PASSWORD=your_password MYSQL_DATABASE=your_database uvx mysql_mcp_server
 ```
 
-Add `--scope project` after `mcp add` to keep the registration in the current workspace. See [Autohand Code](https://github.com/autohandai/code-cli/) for current CLI details.
+在 `mcp add` 后加 `--scope project` 可将注册信息保留在当前工作区。当前 CLI 详情见 [Autohand Code](https://github.com/autohandai/code-cli/)。
 
-## Configuration
-Set the following environment variables:
+## 配置
+设置以下环境变量：
 ```bash
-MYSQL_HOST=localhost     # Database host
-MYSQL_PORT=3306         # Optional: Database port (defaults to 3306 if not specified)
+MYSQL_HOST=localhost     # 数据库主机
+MYSQL_PORT=3306         # 可选：数据库端口（不指定时默认 3306）
 MYSQL_USER=your_username
 MYSQL_PASSWORD=your_password
-MYSQL_DATABASE=your_database # Optional: Omit for multi-database mode
+MYSQL_DATABASE=your_database # 可选：留空则进入多数据库模式
 
-# Advanced Configuration
-MYSQL_SSL_MODE=DISABLED  # DISABLED, REQUIRED, VERIFY_CA, VERIFY_IDENTITY
-MYSQL_CONNECT_TIMEOUT=10 # Timeout in seconds
+# 高级配置
+MYSQL_SSL_MODE=DISABLED  # DISABLED、REQUIRED、VERIFY_CA、VERIFY_IDENTITY
+MYSQL_CONNECT_TIMEOUT=10 # 超时时间（秒）
 
-# Connection behaviour (Optional)
-MYSQL_SQL_MODE=TRADITIONAL           # SQL mode applied to the connection (default: TRADITIONAL)
+# 连接行为（可选）
+MYSQL_SQL_MODE=TRADITIONAL           # 连接所应用的 SQL mode（默认：TRADITIONAL）
 
-# Compatibility (Optional)
+# 兼容性（可选）
 MYSQL_CHARSET=utf8mb4
 MYSQL_COLLATION=utf8mb4_unicode_ci
-MYSQL_AUTH_PLUGIN=       # e.g., mysql_native_password for older MySQL versions
-MYSQL_USE_PURE=false     # Force the pure-Python connector (default: false)
-MYSQL_RAISE_ON_WARNINGS=false        # Raise on SQL warnings (default: false)
+MYSQL_AUTH_PLUGIN=       # 例如旧版 MySQL 使用 mysql_native_password
+MYSQL_USE_PURE=false     # 强制使用纯 Python 连接器（默认：false）
+MYSQL_RAISE_ON_WARNINGS=false        # 出现 SQL 警告时抛出异常（默认：false）
 
-# SSE Transport (Optional)
-MCP_TRANSPORT=stdio      # stdio or sse
-MCP_SSE_HOST=0.0.0.0     # Listen on all interfaces (required for Docker/hosting)
-PORT=8000                # HTTP port (fallback for MCP_SSE_PORT)
-MCP_SSE_ALLOWED_HOSTS=   # Comma-separated allowed Host headers (default: localhost:{port},127.0.0.1:{port})
+# SSE 传输（可选）
+MCP_TRANSPORT=stdio      # stdio 或 sse
+MCP_SSE_HOST=0.0.0.0     # 监听所有网卡（Docker/托管部署需要）
+PORT=8000                # HTTP 端口（MCP_SSE_PORT 的回退值）
+MCP_SSE_ALLOWED_HOSTS=   # 逗号分隔的允许 Host 头（默认：localhost:{port},127.0.0.1:{port}）
 
-# SSH Tunneling (Optional)
-MYSQL_SSH_ENABLE=false   # Set to true to enable
-MYSQL_SSH_HOST=          # SSH jump host
-MYSQL_SSH_PORT=22        # SSH port
-MYSQL_SSH_USER=          # SSH username
-MYSQL_SSH_KEY_PATH=      # Path to SSH private key
-MYSQL_SSH_REMOTE_HOST=localhost # Host from the perspective of the jump host
+# SSH 隧道（可选）
+MYSQL_SSH_ENABLE=false   # 设为 true 启用
+MYSQL_SSH_HOST=          # SSH 跳板机
+MYSQL_SSH_PORT=22        # SSH 端口
+MYSQL_SSH_USER=          # SSH 用户名
+MYSQL_SSH_KEY_PATH=      # SSH 私钥路径
+MYSQL_SSH_REMOTE_HOST=localhost # 从跳板机视角看的目标主机
 MYSQL_SSH_REMOTE_PORT=3306
 MYSQL_LOCAL_PORT=3330
 ```
 
-### `.env` file loading
+### `.env` 文件加载
 
-On startup the server automatically loads a `.env` file via `python-dotenv`, so for local use you can simply:
+服务端启动时通过 `python-dotenv` 自动加载 `.env` 文件，本地使用只需：
 
 ```bash
-cp .env.example .env   # then edit with your credentials
+cp .env.example .env   # 然后填入你的凭据
 ```
 
-The file is read from the **process working directory** (and parent directories), which works when you run the server yourself from the project folder.
+该文件从**进程工作目录**（及其父目录）读取，在项目目录下自行启动服务端时可以正常生效。
 
-> ⚠️ **Claude Code / Claude Desktop:** these hosts launch the server from their own working directory, so the project's `.env` will **not** be found and you'll see `Missing required database configuration`. Put your `MYSQL_*` values in the `env` block of the MCP config (shown in the Usage section below) rather than relying on `.env`.
+> ⚠️ **Claude Code / Claude Desktop：** 这些宿主会从它们自己的工作目录启动服务端，因此**找不到**项目里的 `.env`，你会看到 `Missing required database configuration`。请把 `MYSQL_*` 的值写进 MCP 配置的 `env` 块（见下方"使用方式"），不要依赖 `.env`。
 
-### Multi-Database Mode
-When `MYSQL_DATABASE` is not set, the server operates in multi-database mode:
-- `list_resources` returns all user databases (system databases are filtered out)
-- Use fully qualified table names like `mydb.mytable` in SQL queries
-- **Note:** Only single SQL statements are supported. Multi-statement queries (e.g., `USE db; SELECT ...`) are not supported.
+### 多数据库模式
+未设置 `MYSQL_DATABASE` 时，服务端进入多数据库模式：
+- `list_resources` 返回所有用户数据库（系统数据库会被过滤）
+- 在 SQL 查询中使用全限定表名，如 `mydb.mytable`
+- **注意：** 仅支持单条 SQL 语句，不支持多语句查询（如 `USE db; SELECT ...`）。
 
-## Admin Page & Multi-Database Aliases (SSE mode)
+## 管理页面与多数据库别名（SSE 模式）
 
-Run the server in SSE mode and open the built-in admin page to manage multiple
-database connections, each with **separate read/write accounts**:
+以 SSE 模式启动服务端，打开内置管理页面即可管理多个数据库连接，每个连接可配置**独立的读/写账号**：
 
 ```bash
 # Windows PowerShell
@@ -116,80 +115,68 @@ $env:MCP_TRANSPORT="sse"; $env:MCP_SSE_PORT="8000"; python -m mysql_mcp_server
 MCP_TRANSPORT=sse MCP_SSE_PORT=8000 python -m mysql_mcp_server
 ```
 
-Admin page: `http://127.0.0.1:8000/admin/` (loopback only — the admin API and
-page reject non-loopback clients and unknown Host headers; do not place it
-behind a reverse proxy).
+管理页面：`http://127.0.0.1:8000/admin/`（仅限回环访问——管理 API 与页面会拒绝非回环客户端和未知 Host 头；不要将其置于反向代理之后）。
 
-For each alias you configure:
+每个别名可配置：
 
-| Field | Purpose |
+| 字段 | 用途 |
 |---|---|
-| Connection (host/port/database) | Where to connect. Leave database empty for multi-database mode. |
-| Read user (查询用户) | Used for SELECT / SHOW / DESCRIBE / EXPLAIN |
-| Write user (操作用户) | Used for DML/DDL **after confirmation** |
-| write_policy | `client_confirm` (default): if the client lacks elicitation support, writes proceed trusting the client's own tool-confirmation UI. `elicitation_only`: writes are rejected when the client cannot show the server-side confirmation prompt. |
-| allow_delete | Master switch for DELETE / TRUNCATE / DROP (default off) |
+| 连接（host/port/database） | 连接目标。database 留空即为多数据库模式。 |
+| 查询用户（read_user） | 用于 SELECT / SHOW / DESCRIBE / EXPLAIN |
+| 操作用户（write_user） | 用于**确认后**的 DML/DDL |
+| write_policy | `client_confirm`（默认）：客户端不支持 elicitation 时，信任客户端自身的工具确认 UI 继续执行写操作。`elicitation_only`：客户端无法展示服务端确认弹窗时直接拒绝写操作。 |
+| allow_delete | DELETE / TRUNCATE / DROP 的总开关（默认关闭） |
 
-Clients connect per alias: `http://127.0.0.1:8000/sse?alias=db1`
-(omit `alias` to use the default alias). Plain `MYSQL_*` env vars still work
-as a backward-compatible single-database fallback when no `config/databases.json`
-entries exist (read and write share the same account in that mode).
+客户端按别名连接：`http://127.0.0.1:8000/sse?alias=db1`
+（省略 `alias` 时使用默认别名）。当 `config/databases.json` 中没有任何条目时，原有的 `MYSQL_*` 环境变量仍可作为向后兼容的单数据库回退（该模式下读写共用同一账号）。
 
-> Note the difference from [Multi-Database Mode](#multi-database-mode) above:
-> that mode exposes multiple *schemas* over a single connection, while aliases
-> manage multiple *connections*, each with its own accounts and write policy.
+> 注意与上文[多数据库模式](#多数据库模式)的区别：那个模式是在**单个连接**上暴露多个 *schema*；而别名管理的是多个**连接**，每个连接有独立的账号与写策略。
 
-**How writes are confirmed:** the server classifies each statement
-(read / write / delete). Reads run directly on the read account. Writes and
-deletes trigger an MCP **elicitation** prompt showing the full SQL — accept to
-run it with the write account, decline to abort. If the client does not support
-elicitation, the per-alias `write_policy` decides the fallback (see table).
-All write attempts are recorded in the admin page's audit list
-(`logs/audit.log` on disk).
+**写操作如何确认：** 服务端对每条语句做三级判定（读 / 写 / 删除）。读操作直接用查询账号执行；写操作与删除操作会触发 MCP **elicitation** 弹窗展示完整 SQL——接受则用操作账号执行，拒绝则中止。客户端不支持 elicitation 时，按别名的 `write_policy` 决定降级行为（见上表）。所有写操作尝试都会记入管理页面的审计列表（磁盘上为 `logs/audit.log`）。
 
-## Available Tools
+## 可用工具
 
 ### `execute_sql`
-Executes any standard SQL query.
-- **Arguments:** `query` (string)
-- **Features:** Supports `SELECT`, `SHOW`, `DESCRIBE`, and DML (`INSERT`, `UPDATE`, `DELETE`). DML operations are marked with a destructive hint.
-- **Limitation:** Single statements only. Multi-statement queries are not supported.
-- **Cross-database:** Use `database.table` notation to query any database regardless of the `MYSQL_DATABASE` setting.
+执行任意标准 SQL 查询。
+- **参数：** `query`（字符串）
+- **功能：** 支持 `SELECT`、`SHOW`、`DESCRIBE` 与 DML（`INSERT`、`UPDATE`、`DELETE`）。DML 操作带有破坏性提示标记。
+- **限制：** 仅支持单条语句，不支持多语句查询。
+- **跨库：** 无论 `MYSQL_DATABASE` 设置为何，都可用 `database.table` 写法查询任意数据库。
 
 ### `get_schema_info`
-Provides detailed metadata about database structures.
-- **Arguments:** `table_name` (optional string)
-- **Output:** Column names, types, nullability, default values, and comments.
-- **Cross-database:** Pass `database.table` to query a table outside `MYSQL_DATABASE`; bare names use the configured database.
-- **Identifier rules:** Names must contain only alphanumeric characters, underscores, and `$` (dots are allowed as a separator between database and table names).
+提供数据库结构的详细元数据。
+- **参数：** `table_name`（可选字符串）
+- **输出：** 列名、类型、可空性、默认值与注释。
+- **跨库：** 传入 `database.table` 可查询 `MYSQL_DATABASE` 之外的库；裸表名使用已配置的数据库。
+- **标识符规则：** 名称只能包含字母数字、下划线与 `$`（允许用一个点作为 `database.table` 分隔符）。
 
 ### `get_table_sample`
-Fetches a representative sample of data.
-- **Arguments:** `table_name` (string), `limit` (optional integer, max 20)
-- **Use Case:** Quickly understand data formats and content without fetching large result sets.
-- **Cross-database:** Pass `database.table` to sample a table outside `MYSQL_DATABASE`; bare names use the configured database.
-- **Identifier rules:** Names must contain only alphanumeric characters, underscores, and `$` (dots are allowed as a separator between database and table names).
+获取有代表性的数据样本。
+- **参数：** `table_name`（字符串）、`limit`（可选整数，最大 20）
+- **用途：** 无需拉取大结果集即可快速了解数据格式与内容。
+- **跨库：** 传入 `database.table` 可采样 `MYSQL_DATABASE` 之外的库；裸表名使用已配置的数据库。
+- **标识符规则：** 名称只能包含字母数字、下划线与 `$`（允许用一个点作为 `database.table` 分隔符）。
 
-## Available Prompts
+## 可用提示（Prompts）
 
-In addition to tools, the server exposes **MCP prompts** — guided, multi-step workflows that a client can launch on demand. In Claude Code they appear as slash commands (`/mcp__<server>__<prompt>`); in Claude Desktop they appear in the prompts (`+`) menu.
+除工具外，服务端还提供 **MCP prompts**——客户端可按需启动的引导式多步工作流。在 Claude Code 中以斜杠命令形式出现（`/mcp__<server>__<prompt>`）；在 Claude Desktop 中位于提示（`+`）菜单。
 
-| Prompt | Arguments | Description |
+| Prompt | 参数 | 描述 |
 | --- | --- | --- |
-| `explore_database` | *(none)* | Systematically explore the database: discover available tables, inspect their schemas, sample the data, and summarize what's there. |
-| `analyze_table` | `table_name` *(required)* | Deep-dive into a specific table: retrieve its schema, sample its data, and suggest useful queries. Accepts `database.table` notation for cross-database lookups. |
+| `explore_database` | *（无）* | 系统性探索数据库：发现可用表、查看表结构、采样数据并总结内容。 |
+| `analyze_table` | `table_name` *（必填）* | 深入分析指定表：获取表结构、采样数据并给出实用查询建议。支持 `database.table` 写法跨库查询。 |
 
-**Example (Claude Code):**
+**示例（Claude Code）：**
 ```
 /mcp__mysql__explore_database
 /mcp__mysql__analyze_table customers
 ```
 
-Both prompts orchestrate the existing `get_schema_info` and `get_table_sample` tools; `explore_database` also uses resource listing to enumerate tables.
+两个提示均编排现有的 `get_schema_info` 与 `get_table_sample` 工具；`explore_database` 还会利用资源列表来枚举表。
 
-## Usage
-### With Claude Desktop
-Add this to your `claude_desktop_config.json`:
+## 使用方式
+### 配合 Claude Desktop
+将以下内容加入 `claude_desktop_config.json`：
 ```json
 {
   "mcpServers": {
@@ -213,10 +200,10 @@ Add this to your `claude_desktop_config.json`:
 }
 ```
 
-For more detailed examples and agent-specific guidance, see [MCP_USECASES.md](MCP_USECASES.md).
+更详细的示例与各 Agent 专属指引见 [MCP_USECASES.md](MCP_USECASES.md)。
 
-### With Visual Studio Code
-Add this to your `mcp.json`:
+### 配合 Visual Studio Code
+将以下内容加入 `mcp.json`：
 ```json
 {
   "mcpServers": {
@@ -239,44 +226,44 @@ Add this to your `mcp.json`:
   }
 }
 ```
-Note: Will need to install uv for this to work
+注意：需要先安装 uv。
 
-### Debugging with MCP Inspector
-While MySQL MCP Server isn't intended to be run standalone or directly from the command line with Python, you can use the MCP Inspector to debug it.
+### 使用 MCP Inspector 调试
+MySQL MCP Server 并非设计为独立运行或直接用 Python 命令行启动的程序，但你可以使用 MCP Inspector 进行调试。
 
-The MCP Inspector provides a convenient way to test and debug your MCP implementation:
+MCP Inspector 为测试和调试 MCP 实现提供了便捷方式：
 
 ```bash
-# Install dependencies
+# 安装依赖
 pip install -r requirements.txt
-# Use the MCP Inspector for debugging (do not run directly with Python)
+# 使用 MCP Inspector 调试（不要直接用 Python 运行）
 ```
 
-The MySQL MCP Server is designed to be integrated with AI applications like Claude Desktop and should not be run directly as a standalone Python program.
+MySQL MCP Server 设计为集成到 Claude Desktop 等 AI 应用中，不应作为独立 Python 程序直接运行。
 
-## Development
+## 开发
 ```bash
-# Clone the repository
+# 克隆仓库
 git clone https://github.com/designcomputer/mysql_mcp_server.git
 cd mysql_mcp_server
-# Create virtual environment
+# 创建虚拟环境
 python -m venv venv
-source venv/bin/activate  # or `venv\Scripts\activate` on Windows
-# Install development dependencies
+source venv/bin/activate  # Windows 上用 `venv\Scripts\activate`
+# 安装开发依赖
 pip install -r requirements-dev.txt
-# Copy the example config and edit with your credentials
+# 复制示例配置并填入你的凭据
 cp .env.example .env
-# Edit .env with your MySQL connection details
-# Run tests
+# 编辑 .env，填入 MySQL 连接信息
+# 运行测试
 pytest
 ```
 
-## Security Considerations
-- **Identifier Validation:** Table and database names passed to `get_schema_info` and `get_table_sample` are validated against a strict whitelist (alphanumeric, underscore, and `$` only; a single dot is allowed as a `database.table` separator). Other special characters are rejected to prevent SQL injection.
-- **Encrypted Access:** Full support for SSL/TLS and SSH Tunneling for secure remote connections.
-- **Log Privacy:** Passwords and SSH private keys are automatically masked in server logs.
-- **Least Privilege:** Always use a dedicated MySQL user with minimal required permissions.
-- **SSE transport has no built-in authentication.** The SSE server binds to `0.0.0.0` by default and accepts connections without credentials. If you expose it beyond localhost, place it behind a reverse proxy (nginx, Caddy, Traefik) that enforces authentication. Example with nginx and HTTP Basic Auth:
+## 安全注意事项
+- **标识符校验：** 传给 `get_schema_info` 与 `get_table_sample` 的表名和库名会经过严格白名单校验（仅允许字母数字、下划线与 `$`；允许一个点作为 `database.table` 分隔符）。其他特殊字符一律拒绝，以防止 SQL 注入。
+- **加密访问：** 全面支持 SSL/TLS 与 SSH 隧道，保障远程连接安全。
+- **日志隐私：** 密码与 SSH 私钥在服务端日志中自动脱敏。
+- **最小权限：** 始终使用权限最小化的专用 MySQL 用户。
+- **SSE 传输没有内置认证。** SSE 服务端默认绑定 `0.0.0.0` 并接受无凭据连接。如果暴露到 localhost 之外，请放在强制认证的反向代理（nginx、Caddy、Traefik）后面。nginx + HTTP Basic Auth 示例：
 
   ```nginx
   location /sse {
@@ -294,32 +281,32 @@ pytest
   }
   ```
 
-  Set `MCP_SSE_HOST=127.0.0.1` so the server only listens on loopback and the proxy is the sole public entry point. Set `MCP_SSE_ALLOWED_HOSTS` to the public hostname your proxy forwards (e.g. `MCP_SSE_ALLOWED_HOSTS=myserver.example.com:443`).
+  设置 `MCP_SSE_HOST=127.0.0.1` 使服务端只监听回环地址，代理成为唯一公网入口。将 `MCP_SSE_ALLOWED_HOSTS` 设为代理转发的公网主机名（例如 `MCP_SSE_ALLOWED_HOSTS=myserver.example.com:443`）。
 
-See [SECURITY.md](SECURITY.md) for a comprehensive guide on securing your deployment.
+部署安全完整指南见 [SECURITY.md](SECURITY.md)。
 
-## Security Best Practices
-This MCP implementation requires database access to function. For security:
-1. **Create a dedicated MySQL user** with minimal permissions
-2. **Never use root credentials** or administrative accounts
-3. **Restrict database access** to only necessary operations
-4. **Enable logging** for audit purposes
-5. **Regular security reviews** of database access
+## 安全最佳实践
+本 MCP 实现需要数据库访问权限才能工作。为了安全：
+1. **创建专用 MySQL 用户**并授予最小权限
+2. **绝不使用 root 凭据**或管理员账号
+3. **限制数据库访问**至必要操作
+4. **启用日志**用于审计
+5. **定期安全审查**数据库访问
 
-See [MySQL Security Configuration Guide](https://github.com/designcomputer/mysql_mcp_server/blob/main/SECURITY.md) for detailed instructions on:
-- Creating a restricted MySQL user
-- Setting appropriate permissions
-- Monitoring database access
-- Security best practices
+详细操作说明见 [MySQL 安全配置指南](https://github.com/designcomputer/mysql_mcp_server/blob/main/SECURITY.md)，包括：
+- 创建受限 MySQL 用户
+- 设置合适的权限
+- 监控数据库访问
+- 安全最佳实践
 
-⚠️ IMPORTANT: Always follow the principle of least privilege when configuring database access.
+⚠️ 重要：配置数据库访问时务必遵循最小权限原则。
 
-## License
-MIT License - see LICENSE file for details.
+## 许可证
+MIT License - 详情见 LICENSE 文件。
 
-## Contributing
-1. Fork the repository
-2. Create your feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add some amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
+## 参与贡献
+1. Fork 本仓库
+2. 创建功能分支（`git checkout -b feature/amazing-feature`）
+3. 提交变更（`git commit -m 'Add some amazing feature'`）
+4. 推送分支（`git push origin feature/amazing-feature`）
+5. 发起 Pull Request
