@@ -50,6 +50,18 @@ class TestLoad:
         cfg_file.write_text("{not json", encoding="utf-8")
         assert db_config.load_config() == {"default_alias": None, "databases": {}}
 
+    def test_load_corrupt_backs_up(self, cfg_file, no_env):
+        cfg_file.write_text("{not json", encoding="utf-8")
+        db_config.load_config()
+        assert (cfg_file.parent / "databases.json.corrupt").read_text(encoding="utf-8") == "{not json"
+
+    def test_corrupt_original_not_overwritten_by_save(self, cfg_file, no_env):
+        cfg_file.write_text('{"almost": "valid but broken"', encoding="utf-8")
+        db_config.load_config()
+        db_config.save_config({"default_alias": None, "databases": {}})
+        # 损坏的原内容仍在 .corrupt 备份中
+        assert "almost" in (cfg_file.parent / "databases.json.corrupt").read_text(encoding="utf-8")
+
 
 class TestEnvFallback:
     def test_env_creates_default_entry(self, cfg_file, monkeypatch):
@@ -92,6 +104,10 @@ class TestValidate:
         with pytest.raises(ValueError, match="别名"):
             db_config.validate_entry("", entry())
 
+    def test_alias_trailing_newline_rejected(self, no_env):
+        with pytest.raises(ValueError, match="别名"):
+            db_config.validate_entry("abc\n", entry())
+
     def test_missing_host(self, no_env):
         with pytest.raises(ValueError, match="host"):
             db_config.validate_entry("db1", entry(host=""))
@@ -123,6 +139,14 @@ class TestNormalize:
         assert out["allow_delete"] is False
         assert out["port"] == 3306
 
+    def test_ssh_port_bad_int_chinese_error(self, no_env):
+        with pytest.raises(ValueError, match="ssh 端口必须是整数"):
+            db_config.normalize_entry(entry(ssh={"port": "x"}))
+        with pytest.raises(ValueError, match="ssh 端口必须是整数"):
+            db_config.normalize_entry(entry(ssh={"remote_port": "x"}))
+        with pytest.raises(ValueError, match="ssh 端口必须是整数"):
+            db_config.normalize_entry(entry(ssh={"local_port": "x"}))
+
 
 class TestResolve:
     def test_explicit_alias(self, cfg_file, no_env):
@@ -144,6 +168,14 @@ class TestResolve:
 
     def test_nothing_configured(self, cfg_file, no_env):
         assert db_config.resolve(None) is None
+
+    def test_resolve_returns_deepcopy(self, cfg_file, no_env):
+        db_config.save_config({"default_alias": "db1", "databases": {"db1": entry()}})
+        alias, e = db_config.resolve("db1")
+        e["host"] = "mutated"
+        e["read_user"]["user"] = "mutated"
+        assert db_config.load_config()["databases"]["db1"]["host"] == "localhost"
+        assert db_config.load_config()["databases"]["db1"]["read_user"]["user"] == "reader"
 
 
 class TestMasked:

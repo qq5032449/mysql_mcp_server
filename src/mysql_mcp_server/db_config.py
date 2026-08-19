@@ -1,8 +1,10 @@
 """databases.json 配置管理：加载（内存缓存）、校验、原子保存、别名解析、环境变量向后兼容、密码脱敏。"""
 
 import json
+import logging
 import os
 import re
+import shutil
 import tempfile
 from pathlib import Path
 from threading import RLock
@@ -11,10 +13,12 @@ from threading import RLock
 CONFIG_DIR = Path(os.getenv("MYSQL_MCP_CONFIG_DIR", str(Path.cwd() / "config")))
 CONFIG_FILE = CONFIG_DIR / "databases.json"
 
+logger = logging.getLogger("mysql_mcp_server.db_config")
+
 _lock = RLock()
 _cache: dict | None = None
 
-_ALIAS_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+_ALIAS_RE = re.compile(r"[A-Za-z0-9_-]{1,64}")
 _VALID_POLICIES = {"client_confirm", "elicitation_only"}
 
 
@@ -49,7 +53,15 @@ def load_config() -> dict:
         if CONFIG_FILE.exists():
             try:
                 _cache = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
-            except (json.JSONDecodeError, OSError):
+            except (json.JSONDecodeError, OSError) as e:
+                logger.warning(
+                    "Failed to load config %s (%s); backing up and starting empty",
+                    CONFIG_FILE, e,
+                )
+                try:
+                    shutil.copy2(CONFIG_FILE, CONFIG_DIR / (CONFIG_FILE.name + ".corrupt"))
+                except OSError:
+                    pass
                 _cache = _empty_config()
         else:
             _cache = _empty_config()
@@ -87,7 +99,7 @@ def reset_cache() -> None:
 
 def validate_entry(alias: str, entry: dict) -> None:
     """校验别名与条目必填项，非法时抛 ValueError（中文消息供管理页面展示）。"""
-    if not alias or not _ALIAS_RE.match(alias):
+    if not alias or not _ALIAS_RE.fullmatch(alias):
         raise ValueError("别名只能包含字母、数字、下划线、连字符，长度 1-64")
     if not entry.get("host"):
         raise ValueError("host 不能为空")
@@ -111,6 +123,12 @@ def normalize_entry(entry: dict) -> dict:
         acct = entry.get(role) or {}
         return {"user": acct.get("user", ""), "password": acct.get("password", "")}
 
+    def _ssh_int(value) -> int:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            raise ValueError("ssh 端口必须是整数") from None
+
     ssh = entry.get("ssh") or {}
     return {
         "host": entry.get("host", "localhost"),
@@ -126,25 +144,28 @@ def normalize_entry(entry: dict) -> dict:
         "ssh": {
             "enable": bool(ssh.get("enable", False)),
             "host": ssh.get("host"),
-            "port": int(ssh.get("port", 22)),
+            "port": _ssh_int(ssh.get("port", 22)),
             "user": ssh.get("user"),
             "key_path": ssh.get("key_path"),
             "remote_host": ssh.get("remote_host", "localhost"),
-            "remote_port": int(ssh.get("remote_port", 3306)),
-            "local_port": int(ssh.get("local_port", 3330)),
+            "remote_port": _ssh_int(ssh.get("remote_port", 3306)),
+            "local_port": _ssh_int(ssh.get("local_port", 3330)),
         },
     }
 
 
 def resolve(alias: str | None) -> tuple[str, dict] | None:
-    """解析别名到 (alias, entry)。alias=None 时用 default_alias；解析失败返回 None。"""
+    """解析别名到 (alias, entry)。alias=None 时用 default_alias；解析失败返回 None。
+
+    返回的 entry 是深拷贝，调用方原地修改不会污染缓存。
+    """
     cfg = load_config()
     dbs = cfg.get("databases", {})
     if alias:
-        return (alias, dbs[alias]) if alias in dbs else None
+        return (alias, json.loads(json.dumps(dbs[alias]))) if alias in dbs else None
     default = cfg.get("default_alias")
     if default and default in dbs:
-        return default, dbs[default]
+        return default, json.loads(json.dumps(dbs[default]))
     return None
 
 
