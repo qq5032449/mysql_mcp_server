@@ -75,6 +75,17 @@ class TestLanTokenAccess:
         c = TestClient(app, client=("127.0.0.1", 50000))
         assert c.get("/api/databases").status_code == 200
 
+    def test_lan_guard_works_when_mounted(self, monkeypatch, no_env):
+        """回归：Mount 挂载（如主服务 /admin）时 url.path 含前缀，令牌校验不得被跳过。"""
+        monkeypatch.setattr(admin_api, "_ADMIN_TOKEN", "secret123")
+        from mysql_mcp_server.server import build_starlette_app
+        from starlette.routing import Mount
+        from starlette.applications import Starlette
+        host_app = Starlette(routes=[Mount("/admin", app=admin_api.create_admin_app())])
+        c = TestClient(host_app, client=("192.168.84.5", 50000))
+        assert c.get("/admin/api/health").status_code == 401
+        assert c.get("/admin/api/health", headers={"X-Admin-Token": "secret123"}).status_code == 200
+
     def test_lan_static_page_served_without_token(self, app, monkeypatch, no_env):
         """静态页本身放行（无敏感数据），由前端在 401 后引导输入令牌。"""
         monkeypatch.setattr(admin_api, "_ADMIN_TOKEN", "secret123")

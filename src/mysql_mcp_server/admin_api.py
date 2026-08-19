@@ -215,7 +215,12 @@ class _GuardMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         if not _host_allowed(request.headers.get("host")):
             return JSONResponse({"error": "forbidden: Host header not allowed"}, status_code=403)
-        if request.url.path.startswith("/api"):
+        # Mount 挂载时 url.path 含挂载前缀（如 /admin/api/health），剥掉 root_path 后再判断
+        root_path = request.scope.get("root_path", "")
+        path = request.url.path
+        if root_path and path.startswith(root_path):
+            path = path[len(root_path):]
+        if path.startswith("/api"):
             if (g := _guard(request)):
                 return g
         return await call_next(request)
