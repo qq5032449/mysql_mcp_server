@@ -1,7 +1,21 @@
 import pytest
 from unittest.mock import MagicMock, patch
+from mysql_mcp_server import db_config
 from mysql_mcp_server.server import call_tool
 from mcp.types import TextContent
+
+
+@pytest.fixture(autouse=True)
+def _env_config(tmp_path, monkeypatch):
+    """别名路由走 db_config.resolve：提供 env 回退条目 + 空配置文件。"""
+    monkeypatch.setenv("MYSQL_USER", "u")
+    monkeypatch.setenv("MYSQL_PASSWORD", "p")
+    monkeypatch.setattr(db_config, "CONFIG_FILE", tmp_path / "databases.json")
+    monkeypatch.setattr(db_config, "CONFIG_DIR", tmp_path)
+    db_config.reset_cache()
+    yield
+    db_config.reset_cache()
+
 
 @pytest.mark.asyncio
 @patch("mysql_mcp_server.server.connect")
@@ -60,8 +74,9 @@ async def test_call_tool_empty_results(mock_get_config, mock_connect):
 @pytest.mark.asyncio
 @patch("mysql_mcp_server.server.connect")
 @patch("mysql_mcp_server.server.get_db_config")
-async def test_call_tool_show_tables(mock_get_config, mock_connect):
+async def test_call_tool_show_tables(mock_get_config, mock_connect, monkeypatch):
     """Test SHOW TABLES formatting."""
+    monkeypatch.setenv("MYSQL_DATABASE", "test_db")
     mock_get_config.return_value = {"database": "test_db"}
     
     mock_cursor = MagicMock()
@@ -82,11 +97,12 @@ async def test_call_tool_show_tables(mock_get_config, mock_connect):
 @pytest.mark.asyncio
 @patch("mysql_mcp_server.server.connect")
 @patch("mysql_mcp_server.server.get_db_config")
-async def test_list_resources_identifier_safe(mock_get_config, mock_connect):
+async def test_list_resources_identifier_safe(mock_get_config, mock_connect, monkeypatch):
     """Test that resources have identifier-safe names for strict LLMs (Issue #39)."""
     from mysql_mcp_server.server import list_resources
-    
+
     # Mock for single-database mode
+    monkeypatch.setenv("MYSQL_DATABASE", "test_db")
     mock_get_config.return_value = {"database": "test_db", "user": "u", "password": "p"}
     mock_cursor = MagicMock()
     mock_cursor.fetchall.return_value = [("users",), ("products",)]

@@ -1,5 +1,6 @@
 import pytest
 from unittest.mock import patch, MagicMock
+from mysql_mcp_server import db_config
 from mysql_mcp_server.server import app, list_tools, list_prompts, get_prompt, list_resources, read_resource, call_tool, validate_identifier, parse_table_arg, get_db_config
 from pydantic import AnyUrl
 
@@ -158,40 +159,56 @@ async def test_execute_sql_multi_statement():
 
 
 @pytest.mark.asyncio
-async def test_get_schema_info_cross_database(monkeypatch):
+async def test_get_schema_info_cross_database(monkeypatch, tmp_path):
     """get_schema_info with database.table uses explicit TABLE_SCHEMA filter."""
     monkeypatch.setenv("MYSQL_USER", "u")
     monkeypatch.setenv("MYSQL_PASSWORD", "p")
+    monkeypatch.setattr(db_config, "CONFIG_FILE", tmp_path / "databases.json")
+    monkeypatch.setattr(db_config, "CONFIG_DIR", tmp_path)
+    db_config.reset_cache()
 
     captured = {}
 
-    async def fake_run_query(query):
+    async def fake_run_query_entry(entry, query, role):
         captured["query"] = query
+        captured["role"] = role
         return []
 
-    with patch("mysql_mcp_server.server.run_query", side_effect=fake_run_query):
-        await call_tool("get_schema_info", {"table_name": "otherdb.mytable"})
+    try:
+        with patch("mysql_mcp_server.server.run_query_entry", side_effect=fake_run_query_entry):
+            await call_tool("get_schema_info", {"table_name": "otherdb.mytable"})
+    finally:
+        db_config.reset_cache()
 
     assert "TABLE_SCHEMA = 'otherdb'" in captured["query"]
     assert "TABLE_NAME = 'mytable'" in captured["query"]
+    assert captured["role"] == "read"
 
 
 @pytest.mark.asyncio
-async def test_get_table_sample_cross_database(monkeypatch):
+async def test_get_table_sample_cross_database(monkeypatch, tmp_path):
     """get_table_sample with database.table uses backtick-quoted db.table reference."""
     monkeypatch.setenv("MYSQL_USER", "u")
     monkeypatch.setenv("MYSQL_PASSWORD", "p")
+    monkeypatch.setattr(db_config, "CONFIG_FILE", tmp_path / "databases.json")
+    monkeypatch.setattr(db_config, "CONFIG_DIR", tmp_path)
+    db_config.reset_cache()
 
     captured = {}
 
-    async def fake_run_query(query):
+    async def fake_run_query_entry(entry, query, role):
         captured["query"] = query
+        captured["role"] = role
         return []
 
-    with patch("mysql_mcp_server.server.run_query", side_effect=fake_run_query):
-        await call_tool("get_table_sample", {"table_name": "otherdb.mytable"})
+    try:
+        with patch("mysql_mcp_server.server.run_query_entry", side_effect=fake_run_query_entry):
+            await call_tool("get_table_sample", {"table_name": "otherdb.mytable"})
+    finally:
+        db_config.reset_cache()
 
     assert "`otherdb`.`mytable`" in captured["query"]
+    assert captured["role"] == "read"
 
 
 @pytest.mark.asyncio

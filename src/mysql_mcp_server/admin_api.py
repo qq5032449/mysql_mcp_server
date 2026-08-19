@@ -203,7 +203,7 @@ def create_admin_app() -> Starlette:
             Route("/api/settings", update_settings, methods=["PUT"]),
             Route("/api/audit", get_audit, methods=["GET"]),
             Route("/api/health", get_health, methods=["GET"]),
-            Mount("/admin", app=StaticFiles(directory=STATIC_DIR, html=True, check_dir=False), name="admin"),
+            Mount("/", app=StaticFiles(directory=STATIC_DIR, html=True, check_dir=False), name="admin"),
         ],
         middleware=[Middleware(_GuardMiddleware)],
     )

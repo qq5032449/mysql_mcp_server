@@ -13,15 +13,19 @@ from typing import List, Optional, Tuple, Any
 import anyio
 from mysql.connector import connect, Error
 from mcp.server import Server
+from mcp.server.sse import SseServerTransport
 from mcp.types import (
     Resource, Tool, TextContent, ToolAnnotations, ResourceTemplate,
     Prompt, PromptArgument, PromptMessage, GetPromptResult,
 )
 from pydantic import AnyUrl
 from dotenv import load_dotenv
+from starlette.applications import Starlette
+from starlette.responses import PlainTextResponse, Response
+from starlette.routing import Mount, Route
 
 from mysql_mcp_server import admin_api, audit, db_config
-from mysql_mcp_server.sql_classify import classify, first_keyword
+from mysql_mcp_server.sql_classify import classify, first_keyword, cte_main_keyword
 
 # Load environment variables from .env file if it exists.
 # This allows for easy local configuration of database and SSH credentials.
@@ -278,7 +282,10 @@ _KIND_LABELS = {"write": "写", "delete": "删除类"}
 async def execute_sql_entry(alias: str, entry: dict, query: str) -> list[TextContent]:
     """三级判定 + 双账号执行 + 双通道确认（设计文档 4.3 节）。"""
     kind = classify(query)
-    sql_type = first_keyword(query) or kind.upper()
+    kw = first_keyword(query)
+    if kw == "WITH":
+        kw = cte_main_keyword(query)
+    sql_type = kw or kind.upper()
 
     if kind == "read":
         return await run_query_entry(entry, query, "read")
@@ -311,15 +318,21 @@ async def execute_sql_entry(alias: str, entry: dict, query: str) -> list[TextCon
 # Create the MCP Server instance.
 app = Server("mysql_mcp_server")
 
-@app.list_resources()
-async def list_resources() -> list[Resource]:
+
+async def list_resources_impl(alias: str | None = None) -> list[Resource]:
     """
     Lists available MySQL tables (or databases if no default database is configured) as resources.
     This allows AI agents to discover what data is available.
+    未配置任何数据库时返回空列表。
     """
+    resolved = db_config.resolve(alias)
+    if resolved is None:
+        return []
+    _, entry = resolved
+
     def _sync_list():
-        with maybe_ssh_tunnel() as (host, port):
-            config = get_db_config(host, port)
+        with maybe_ssh_tunnel_for(entry) as (host, port):
+            config = build_connector_config(entry, "read", host, port)
             try:
                 with connect(**config) as conn:
                     with conn.cursor() as cursor:
@@ -355,8 +368,14 @@ async def list_resources() -> list[Resource]:
                 error_msg = getattr(e, 'msg', None) or str(e) or 'Unknown MySQL error'
                 logger.error(f"Failed to list resources: {error_msg}")
                 return []
-                
+
     return await anyio.to_thread.run_sync(_sync_list)
+
+
+@app.list_resources()
+async def list_resources() -> list[Resource]:
+    """模块级默认实例（无别名）：转发到 list_resources_impl。"""
+    return await list_resources_impl(None)
 
 @app.list_resource_templates()
 async def list_resource_templates() -> list[ResourceTemplate]:
@@ -366,14 +385,20 @@ async def list_resource_templates() -> list[ResourceTemplate]:
     """
     return []
 
-@app.read_resource()
-async def read_resource(uri: AnyUrl) -> str:
+
+async def read_resource_impl(alias: str | None = None, uri: AnyUrl = None) -> str:
     """
     Reads the content of a specific table or lists tables within a database based on the provided URI.
+    资源读取固定使用 read 角色；未配置任何数据库时抛 RuntimeError。
     """
+    resolved = db_config.resolve(alias)
+    if resolved is None:
+        raise RuntimeError("No database configured")
+    _, entry = resolved
+
     def _sync_read():
-        with maybe_ssh_tunnel() as (host, port):
-            config = get_db_config(host, port)
+        with maybe_ssh_tunnel_for(entry) as (host, port):
+            config = build_connector_config(entry, "read", host, port)
             uri_str = str(uri)
             if not uri_str.startswith("mysql://"):
                 raise ValueError(f"Invalid URI scheme: {uri_str}")
@@ -412,6 +437,51 @@ async def read_resource(uri: AnyUrl) -> str:
                 raise RuntimeError(f"Database error: {error_msg}")
 
     return await anyio.to_thread.run_sync(_sync_read)
+
+
+@app.read_resource()
+async def read_resource(uri: AnyUrl) -> str:
+    """模块级默认实例（无别名）：转发到 read_resource_impl。"""
+    return await read_resource_impl(None, uri)
+
+
+# ---------------------------------------------------------------------------
+# 别名 Server 工厂：SSE 模式下每个别名一个 MCP Server 实例
+# ---------------------------------------------------------------------------
+
+_server_registry: dict[str, Server] = {}
+
+
+def invalidate_alias(alias: str | None = None) -> None:
+    """配置变更后使别名 Server 缓存失效（admin_api 回调触发；None 清空全部）。"""
+    if alias is None:
+        _server_registry.clear()
+    else:
+        _server_registry.pop(alias, None)
+
+
+def create_alias_server(alias: str) -> Server:
+    """创建绑定指定别名的 MCP Server 实例（SSE 每别名一实例）。"""
+    s = Server("mysql_mcp_server")
+    s.list_tools()(list_tools)
+    s.list_resource_templates()(list_resource_templates)
+    s.list_prompts()(list_prompts)
+    s.get_prompt()(get_prompt)
+
+    async def _list_resources() -> list[Resource]:
+        return await list_resources_impl(alias)
+
+    async def _read_resource(uri: AnyUrl) -> str:
+        return await read_resource_impl(alias, uri)
+
+    async def _call_tool(name: str, arguments: dict) -> list[TextContent]:
+        return await call_tool_impl(name, arguments, alias)
+
+    s.list_resources()(_list_resources)
+    s.read_resource()(_read_resource)
+    s.call_tool()(_call_tool)
+    return s
+
 
 @app.list_tools()
 async def list_tools() -> list[Tool]:
@@ -496,10 +566,13 @@ async def list_tools() -> list[Tool]:
         )
     ]
 
-@app.call_tool()
-async def call_tool(name: str, arguments: dict) -> list[TextContent]:
+_NO_CONFIG_HINT = "未配置任何数据库连接，请访问管理页面 /admin 进行配置。"
+
+
+async def call_tool_impl(name: str, arguments: dict, alias: str | None = None) -> list[TextContent]:
     """
-    Dispatches tool calls from AI agents to the appropriate implementation logic.
+    工具调用实现：按别名路由到 execute_sql_entry / run_query_entry（read 角色）。
+    alias=None 时用默认别名（databases.json 缺省时回退环境变量）。
     """
     try:
         logger.info(f"Calling tool: {name} with arguments: {arguments}")
@@ -513,9 +586,17 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                     "Only single statements are supported. "
                     "Instead of USE statements, use fully qualified names: database.table"
                 ))]
-            return await run_query(query)
+            resolved = db_config.resolve(alias)
+            if resolved is None:
+                return [TextContent(type="text", text=_NO_CONFIG_HINT)]
+            a, entry = resolved
+            return await execute_sql_entry(a, entry, query)
 
         elif name == "get_schema_info":
+            resolved = db_config.resolve(alias)
+            if resolved is None:
+                return [TextContent(type="text", text=_NO_CONFIG_HINT)]
+            _, entry = resolved
             table_name = arguments.get("table_name")
             if table_name:
                 db, tbl = parse_table_arg(table_name)
@@ -523,14 +604,18 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 query = f"SELECT COLUMN_NAME, DATA_TYPE, IS_NULLABLE, COLUMN_DEFAULT, COLUMN_COMMENT FROM information_schema.COLUMNS WHERE {schema_filter} AND TABLE_NAME = '{tbl}' ORDER BY ORDINAL_POSITION"
             else:
                 query = "SELECT TABLE_NAME, COLUMN_NAME, DATA_TYPE, IS_NULLABLE FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() ORDER BY TABLE_NAME, ORDINAL_POSITION"
-            return await run_query(query)
+            return await run_query_entry(entry, query, "read")
 
         elif name == "get_table_sample":
+            resolved = db_config.resolve(alias)
+            if resolved is None:
+                return [TextContent(type="text", text=_NO_CONFIG_HINT)]
+            _, entry = resolved
             db, tbl = parse_table_arg(arguments.get("table_name"))
             limit = min(arguments.get("limit", 5), 20)
             table_ref = f"`{db}`.`{tbl}`" if db else f"`{tbl}`"
             query = f"SELECT * FROM {table_ref} LIMIT {limit}"
-            return await run_query(query)
+            return await run_query_entry(entry, query, "read")
 
         else:
             raise ValueError(f"Unknown tool: {name}")
@@ -540,6 +625,14 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         # Return the error as a TextContent so the client can display it.
         # This addresses Issue #50 where errors were not being reported clearly.
         return [TextContent(type="text", text=f"Error calling tool {name}: {str(e)}")]
+
+
+@app.call_tool()
+async def call_tool(name: str, arguments: dict) -> list[TextContent]:
+    """
+    Dispatches tool calls from AI agents to the appropriate implementation logic.
+    """
+    return await call_tool_impl(name, arguments, alias=None)
 
 @app.list_prompts()
 async def list_prompts() -> list[Prompt]:
@@ -708,16 +801,64 @@ async def _run_stdio_server():
             logger.error(f"Server error: {str(e)}", exc_info=True)
             raise
 
+
+async def health_check(request):
+    """Simple health check endpoint."""
+    return Response("MySQL MCP Server is running", media_type="text/plain")
+
+
+def build_starlette_app(security_settings=None):
+    """构建主 HTTP app：SSE 别名路由 + admin 挂载（可测试，无参调用即默认安全设置）。"""
+    _transport_registry: dict[str, SseServerTransport] = {}
+
+    def _make_transport(alias: str) -> SseServerTransport:
+        if alias not in _transport_registry:
+            endpoint = f"/messages/{alias}/"
+            _transport_registry[alias] = SseServerTransport(endpoint, security_settings=security_settings)
+        return _transport_registry[alias]
+
+    async def handle_sse(request):
+        requested = request.query_params.get("alias")
+        resolved = db_config.resolve(requested)
+        if resolved is None:
+            return PlainTextResponse(
+                f"Unknown alias '{requested or ''}'. 请先在管理页面 /admin 配置数据库。", status_code=404)
+        alias, _entry = resolved
+        transport = _make_transport(alias)
+        if alias not in _server_registry:
+            _server_registry[alias] = create_alias_server(alias)
+        server = _server_registry[alias]
+        async with transport.connect_sse(request.scope, request.receive, request._send) as streams:
+            await server.run(streams[0], streams[1], server.create_initialization_options())
+        return Response()
+
+    class AliasMessagesEndpoint:
+        async def __call__(self, scope, receive, send):
+            alias = scope.get("path_params", {}).get("alias")
+            transport = _transport_registry.get(alias)
+            if transport is None:
+                resp = PlainTextResponse("Unknown alias", status_code=404)
+                await resp(scope, receive, send)
+                return
+            await transport.handle_post_message(scope, receive, send)
+
+    admin_api.register_on_change(invalidate_alias)
+
+    return Starlette(routes=[
+        Route("/", endpoint=health_check),
+        Route("/sse", endpoint=handle_sse),
+        Route("/messages/{alias}/", endpoint=AliasMessagesEndpoint()),
+        Route("/messages/{alias}", endpoint=AliasMessagesEndpoint()),
+        Mount("/admin", app=admin_api.create_admin_app(), name="admin"),
+    ])
+
+
 async def _run_sse_server():
     """
     Runs the server using Server-Sent Events (SSE) over HTTP.
     Requires 'starlette' and 'uvicorn' dependencies.
     """
     try:
-        from mcp.server.sse import SseServerTransport
-        from starlette.applications import Starlette
-        from starlette.routing import Mount, Route
-        from starlette.responses import Response
         import uvicorn
     except ImportError:
         logger.error("SSE transport requires additional dependencies. Install with: pip install mysql_mcp_server[sse]")
@@ -759,26 +900,7 @@ async def _run_sse_server():
         )
         security_settings = None
 
-    sse = SseServerTransport("/messages/", security_settings=security_settings) if security_settings is not None else SseServerTransport("/messages/")
-
-    async def handle_sse(request):
-        """Handler for the SSE connection endpoint."""
-        async with sse.connect_sse(request.scope, request.receive, request._send) as streams:
-            await app.run(streams[0], streams[1], app.create_initialization_options())
-        return Response()
-
-    async def health_check(request):
-        """Simple health check endpoint."""
-        return Response("MySQL MCP Server is running", media_type="text/plain")
-
-    # Define the Starlette application with SSE routes and a health check.
-    starlette_app = Starlette(
-        routes=[
-            Route("/", endpoint=health_check),
-            Route("/sse", endpoint=handle_sse),
-            Mount("/messages/", app=sse.handle_post_message),
-        ]
-    )
+    starlette_app = build_starlette_app(security_settings=security_settings)
 
     # Configure and start the Uvicorn server.
     server_config = uvicorn.Config(starlette_app, host=host, port=port, log_level="info")

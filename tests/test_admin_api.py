@@ -204,6 +204,6 @@ class TestAuditHealth:
 
 class TestAdminPage:
     def test_admin_index_served(self, client, no_env):
-        r = client.get("/admin/")
+        r = client.get("/")
         assert r.status_code == 200
         assert "MySQL MCP 管理页面" in r.text

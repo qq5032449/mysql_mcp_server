@@ -178,7 +178,7 @@ async function api(path, opts = {}) {
 
 /* ---------- 数据库列表 ---------- */
 async function loadDbs() {
-  dbs = await api("/api/databases");
+  dbs = await api("api/databases");
   renderDbs();
   renderSse();
 }
@@ -239,7 +239,7 @@ function copySse(el) {
 
 /* ---------- 写操作审计 ---------- */
 async function loadAudit() {
-  const entries = await api("/api/audit");
+  const entries = await api("api/audit");
   const rows = [...entries].reverse();  // 最新在前
   $("auditEmpty").style.display = rows.length ? "none" : "";
   $("auditBody").innerHTML = rows.map(e => `<tr>
@@ -319,16 +319,16 @@ async function doSave() {
   const data = collectForm();
   if (!data) return null;
   if (editingAlias) {
-    await api("/api/databases/" + encodeURIComponent(editingAlias),
+    await api("api/databases/" + encodeURIComponent(editingAlias),
               { method: "PUT", body: JSON.stringify(data) });
   } else {
-    await api("/api/databases", { method: "POST", body: JSON.stringify(data) });
+    await api("api/databases", { method: "POST", body: JSON.stringify(data) });
   }
   return data.alias;
 }
 
 async function testConn(alias, asWrite) {
-  return api("/api/databases/" + encodeURIComponent(alias) + "/test",
+  return api("api/databases/" + encodeURIComponent(alias) + "/test",
              { method: "POST", body: JSON.stringify({ as_write: !!asWrite }) });
 }
 
@@ -343,13 +343,13 @@ async function testExisting(alias, asWrite) {
 
 async function removeDb(alias) {
   if (!confirm('确定删除数据库配置 "' + alias + '" 吗？')) return;
-  try { await api("/api/databases/" + encodeURIComponent(alias), { method: "DELETE" }); loadDbs(); }
+  try { await api("api/databases/" + encodeURIComponent(alias), { method: "DELETE" }); loadDbs(); }
   catch (e) { alert("删除失败：" + e.message); }
 }
 
 async function setDefault(alias) {
   try {
-    await api("/api/settings", { method: "PUT", body: JSON.stringify({ default_alias: alias }) });
+    await api("api/settings", { method: "PUT", body: JSON.stringify({ default_alias: alias }) });
     loadDbs();
   } catch (e) { alert("设置失败：" + e.message); }
 }
