@@ -34,10 +34,13 @@ echo "=== [3/4] pyinstaller build ==="
 rm -rf build dist
 # 不用 --collect-all mcp（会连带 mcp.cli 依赖 typer 而失败）；
 # 只补齐 server.py 中延迟/条件 import 的模块
+# --collect-all mysql：mysql-connector 的认证插件（plugins/mysql_native_password）
+# 与错误消息（locales/eng）均为运行时动态加载，必须整体收集
 $PY -m PyInstaller --onefile --name mysql_mcp_server \
   --hidden-import mcp.server.sse \
   --hidden-import mcp.server.transport_security \
   --hidden-import mcp.server.lowlevel.server \
+  --collect-all mysql \
   --collect-data mysql_mcp_server \
   --paths src \
   --distpath dist \
