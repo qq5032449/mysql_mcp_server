@@ -20,6 +20,9 @@ from mcp.types import (
 from pydantic import AnyUrl
 from dotenv import load_dotenv
 
+from mysql_mcp_server import admin_api, audit, db_config
+from mysql_mcp_server.sql_classify import classify, first_keyword
+
 # Load environment variables from .env file if it exists.
 # This allows for easy local configuration of database and SSH credentials.
 load_dotenv()
@@ -183,6 +186,127 @@ def get_db_config(host=None, port=None):
             config["ssl_ca"] = ssl_ca
 
     return config
+
+# ---------------------------------------------------------------------------
+# 别名/双账号支持：从 databases.json 条目构造连接配置并执行
+# ---------------------------------------------------------------------------
+
+def build_connector_config(entry: dict, role: str, host=None, port=None) -> dict:
+    """从别名条目构造 mysql.connector 配置；role='read'|'write' 选择对应账号。"""
+    acct = entry[f"{role}_user"]
+    config = {
+        "host": host or entry["host"],
+        "port": port or int(entry.get("port", 3306)),
+        "user": acct["user"],
+        "password": acct["password"],
+        "charset": entry.get("charset") or "utf8mb4",
+        "collation": entry.get("collation") or "utf8mb4_unicode_ci",
+        "autocommit": True,
+        "sql_mode": entry.get("sql_mode") or "TRADITIONAL",
+        "connect_timeout": int(entry.get("connect_timeout", 10)),
+    }
+    if entry.get("database"):
+        config["database"] = entry["database"]
+    return {k: v for k, v in config.items() if v is not None}
+
+
+@contextmanager
+def maybe_ssh_tunnel_for(entry: dict):
+    """按别名条目的 ssh 配置建立隧道；未启用时直连。"""
+    ssh = entry.get("ssh") or {}
+    if not ssh.get("enable"):
+        yield entry["host"], int(entry.get("port", 3306))
+        return
+
+    local_port = int(ssh.get("local_port", 3330))
+    logger.info(
+        f"Starting SSH tunnel for alias: {ssh.get('user')}@{ssh.get('host')}:{ssh.get('port', 22)} "
+        f"-> {local_port}:{ssh.get('remote_host', 'localhost')}:{ssh.get('remote_port', 3306)}"
+    )
+    ssh_cmd = [
+        'ssh', '-i', ssh.get("key_path") or '',
+        '-N', '-o', 'ExitOnForwardFailure=yes', '-o', 'BatchMode=yes',
+        '-L', f"{local_port}:{ssh.get('remote_host', 'localhost')}:{ssh.get('remote_port', 3306)}",
+        f"{ssh.get('user')}@{ssh.get('host')}", '-p', str(ssh.get("port", 22)),
+    ]
+    ssh_proc = subprocess.Popen(ssh_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    try:
+        time.sleep(2)
+        if ssh_proc.poll() is not None:
+            stderr = ssh_proc.stderr.read().decode()
+            raise RuntimeError(f"SSH tunnel process exited prematurely: {stderr}")
+        yield "127.0.0.1", local_port
+    finally:
+        try:
+            ssh_proc.terminate()
+            ssh_proc.wait(timeout=5)
+        except Exception as e:
+            logger.error(f"Error terminating SSH tunnel: {e}")
+
+
+async def elicit_confirm(alias: str, kind_label: str, query: str, timeout: float = 30.0) -> str | None:
+    """发起服务端 SQL 确认（MCP elicitation）。
+
+    返回 'accept' / 'decline' / 'cancel'；客户端不支持或超时返回 None（由调用方降级）。
+    """
+    from mcp.server.lowlevel.server import request_ctx
+    try:
+        ctx = request_ctx.get()
+    except LookupError:
+        return None
+    session = ctx.session
+    params = session.client_params
+    caps = params.capabilities if params else None
+    if not caps or not caps.elicitation:
+        return None
+    try:
+        with anyio.move_on_after(timeout):
+            result = await session.elicit(
+                message=f"确认在数据库别名 [{alias}] 上执行{kind_label}操作：\n\n{query}",
+                requestedSchema={"type": "object", "properties": {}},
+            )
+            return result.action
+    except Exception as e:
+        logger.warning(f"Elicitation failed: {e}")
+        return None
+    return None  # 超时
+
+
+_KIND_LABELS = {"write": "写", "delete": "删除类"}
+
+
+async def execute_sql_entry(alias: str, entry: dict, query: str) -> list[TextContent]:
+    """三级判定 + 双账号执行 + 双通道确认（设计文档 4.3 节）。"""
+    kind = classify(query)
+    sql_type = first_keyword(query) or kind.upper()
+
+    if kind == "read":
+        return await run_query_entry(entry, query, "read")
+
+    if kind == "delete" and not entry.get("allow_delete"):
+        audit.record(alias, sql_type, "-", query, status="rejected_delete_disabled")
+        return [TextContent(type="text", text="该别名未开启删除权限，请在管理页面开启后重试。")]
+
+    label = _KIND_LABELS.get(kind, "写")
+    action = await elicit_confirm(alias, label, query)
+
+    if action == "accept":
+        result = await run_query_entry(entry, query, "write")
+        audit.record(alias, sql_type, "elicitation", query)
+        return result
+    if action in ("decline", "cancel"):
+        audit.record(alias, sql_type, "elicitation", query, status=f"user_{action}")
+        return [TextContent(type="text", text="用户已拒绝执行该 SQL。")]
+
+    # 客户端不支持 elicitation → 按别名策略降级
+    policy = entry.get("write_policy", "client_confirm")
+    if policy == "elicitation_only":
+        audit.record(alias, sql_type, "-", query, status="blocked_policy")
+        return [TextContent(type="text", text=(
+            "当前客户端不支持服务端确认（elicitation），"
+            "且该别名策略为 elicitation_only，写操作已被拒绝。"))]
+    audit.record(alias, sql_type, "client", query)
+    return await run_query_entry(entry, query, "write")
 
 # Create the MCP Server instance.
 app = Server("mysql_mcp_server")
@@ -492,11 +616,57 @@ async def get_prompt(name: str, arguments: dict | None) -> GetPromptResult:
     else:
         raise ValueError(f"Unknown prompt: {name}")
 
+def _format_query_result(cursor, conn, query: str, config: dict) -> list[TextContent]:
+    """按查询类型格式化结果（从原 run_query 提取，逻辑不变）。"""
+    query_upper = query.strip().upper()
+
+    if query_upper.startswith("SHOW TABLES"):
+        tables = cursor.fetchall()
+        db_name = config.get("database", "all databases")
+        result = [f"Tables_in_{db_name}"]
+        result.extend([table[0] for table in tables])
+        return [TextContent(type="text", text="\n".join(result))]
+
+    if any(query_upper.startswith(p) for p in ["DESCRIBE ", "DESC ", "SHOW COLUMNS FROM ", "SHOW FIELDS FROM "]):
+        columns = [desc[0] for desc in cursor.description]
+        rows = cursor.fetchall()
+        results = [",".join(columns)]
+        for row in rows:
+            results.append(",".join(str(v) if v is not None else "NULL" for v in row))
+        return [TextContent(type="text", text="\n".join(results))]
+
+    if cursor.description is not None:
+        columns = [desc[0] for desc in cursor.description]
+        rows = cursor.fetchall()
+        if not rows:
+            return [TextContent(type="text", text="Query executed successfully. No results returned.")]
+        result = [",".join("" if v is None else str(v) for v in row) for row in rows]
+        return [TextContent(type="text", text="\n".join([",".join(columns)] + result))]
+
+    conn.commit()
+    return [TextContent(type="text", text=f"Query executed successfully. Rows affected: {cursor.rowcount}")]
+
+
+async def run_query_entry(entry: dict, query: str, role: str) -> list[TextContent]:
+    """用别名条目 + 指定角色账号执行 SQL。"""
+    def _sync_run():
+        with maybe_ssh_tunnel_for(entry) as (host, port):
+            config = build_connector_config(entry, role, host, port)
+            try:
+                with connect(**config) as conn:
+                    with conn.cursor() as cursor:
+                        cursor.execute(query)
+                        return _format_query_result(cursor, conn, query, config)
+            except Error as e:
+                error_msg = getattr(e, 'msg', None) or str(e) or 'Unknown MySQL error'
+                logger.error(f"Error executing SQL: {error_msg}")
+                return [TextContent(type="text", text=f"Error executing query: {error_msg}")]
+    return await anyio.to_thread.run_sync(_sync_run)
+
 async def run_query(query: str) -> list[TextContent]:
     """
-    A helper function that handles the execution of a SQL query,
-    formatting the results based on the query type (SHOW, DESCRIBE, SELECT, or DML).
-    Uses anyio.to_thread.run_sync to prevent blocking the async event loop.
+    A helper function that handles the execution of a SQL query (env-config,
+    backward compatible). Uses anyio.to_thread.run_sync to prevent blocking.
     """
     def _sync_run():
         with maybe_ssh_tunnel() as (host, port):
@@ -505,47 +675,11 @@ async def run_query(query: str) -> list[TextContent]:
                 with connect(**config) as conn:
                     with conn.cursor() as cursor:
                         cursor.execute(query)
-                        query_upper = query.strip().upper()
-
-                        # Specific handling for 'SHOW TABLES' to provide a cleaner header.
-                        if query_upper.startswith("SHOW TABLES"):
-                            tables = cursor.fetchall()
-                            db_name = config.get("database", "all databases")
-                            result = [f"Tables_in_{db_name}"]
-                            result.extend([table[0] for table in tables])
-                            return [TextContent(type="text", text="\n".join(result))]
-
-                        # Specific handling for inspection queries to format results clearly.
-                        elif any(query_upper.startswith(p) for p in ["DESCRIBE ", "DESC ", "SHOW COLUMNS FROM ", "SHOW FIELDS FROM "]):
-                            columns = [desc[0] for desc in cursor.description]
-                            rows = cursor.fetchall()
-                            results = [",".join(columns)]
-                            for row in rows:
-                                # Convert None values to the string "NULL" for clarity in output.
-                                results.append(",".join(str(v) if v is not None else "NULL" for v in row))
-                            return [TextContent(type="text", text="\n".join(results))]
-
-                        # Handling for standard result sets (SELECT, etc.).
-                        elif cursor.description is not None:
-                            columns = [desc[0] for desc in cursor.description]
-                            rows = cursor.fetchall()
-                            if not rows:
-                                return [TextContent(type="text", text="Query executed successfully. No results returned.")]
-                            # Format rows as CSV-like text.
-                            result = [",".join("" if v is None else str(v) for v in row) for row in rows]
-                            return [TextContent(type="text", text="\n".join([",".join(columns)] + result))]
-
-                        # Handling for Data Manipulation Language (DML) queries like INSERT, UPDATE, DELETE.
-                        else:
-                            conn.commit() # Ensure changes are persistent.
-                            return [TextContent(type="text", text=f"Query executed successfully. Rows affected: {cursor.rowcount}")]
-
+                        return _format_query_result(cursor, conn, query, config)
             except Error as e:
-                # Extract and log specific MySQL error messages.
                 error_msg = getattr(e, 'msg', None) or str(e) or 'Unknown MySQL error'
                 logger.error(f"Error executing SQL: {error_msg}")
                 return [TextContent(type="text", text=f"Error executing query: {error_msg}")]
-
     return await anyio.to_thread.run_sync(_sync_run)
 
 async def main():
