@@ -100,20 +100,58 @@ async def test_write_fallback_issues_token():
     assert len(server._pending_tokens) == 1
 
 
+def _get_token(result) -> str:
+    return result[0].text.split("confirm_token=")[1].split()[0].strip("`'\"")
+
+
+def _simulate_user_confirmation(server, token: str) -> None:
+    """模拟用户确认耗时（跳过 3 秒冷静期）。"""
+    server._pending_tokens[token]["not_before"] = 0.0
+
+
 @pytest.mark.asyncio
 async def test_token_confirm_executes():
-    """携带有效令牌 → 用 write 账号执行，令牌消费。"""
+    """携带有效令牌（经用户确认、超过冷静期）→ 用 write 账号执行，令牌消费。"""
     from mysql_mcp_server import server
     server._pending_tokens.clear()
     ok = TextContent(type="text", text="done")
     with patch("mysql_mcp_server.server.elicit_confirm", new=AsyncMock(return_value=None)), \
          patch("mysql_mcp_server.server.run_query_entry", new=AsyncMock(return_value=[ok])) as rq:
         first = await execute_sql_entry("db1", make_entry(), "UPDATE t SET x=1")
-        token = first[0].text.split("confirm_token=")[1].split()[0].strip("`'\"")
+        token = _get_token(first)
+        _simulate_user_confirmation(server, token)
         second = await execute_sql_entry("db1", make_entry(), "UPDATE t SET x=1", confirm_token=token)
     assert text_of(second) == "done"
     assert rq.await_args.args[2] == "write"
     assert len(server._pending_tokens) == 0  # 已消费
+
+
+@pytest.mark.asyncio
+async def test_token_used_too_early_rejected_and_invalidated():
+    """签发后立即使用（3 秒冷静期内）→ 拒绝执行且令牌作废，提示必须走用户确认。"""
+    from mysql_mcp_server import server
+    server._pending_tokens.clear()
+    ok = TextContent(type="text", text="done")
+    with patch("mysql_mcp_server.server.elicit_confirm", new=AsyncMock(return_value=None)), \
+         patch("mysql_mcp_server.server.run_query_entry", new=AsyncMock(return_value=[ok])) as rq:
+        first = await execute_sql_entry("db1", make_entry(), "UPDATE t SET x=1")
+        token = _get_token(first)
+        # 客户端拿到令牌后立即回传（不可能已征求用户同意）
+        early = await execute_sql_entry("db1", make_entry(), "UPDATE t SET x=1", confirm_token=token)
+        assert "AskUserQuestion" in text_of(early)
+        rq.assert_not_awaited()
+        # 令牌已作废：即使时间流逝也无法再用
+        assert token not in server._pending_tokens
+        revived = await execute_sql_entry("db1", make_entry(), "UPDATE t SET x=1", confirm_token=token)
+        assert "令牌" in text_of(revived)
+        rq.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_token_cooling_period_value():
+    """冷静期为 3 秒。"""
+    from mysql_mcp_server import server
+    assert server._TOKEN_MIN_DELAY_SECONDS == 3.0
 
 
 @pytest.mark.asyncio
@@ -124,7 +162,8 @@ async def test_token_replay_rejected():
     with patch("mysql_mcp_server.server.elicit_confirm", new=AsyncMock(return_value=None)), \
          patch("mysql_mcp_server.server.run_query_entry", new=AsyncMock(return_value=[ok])):
         first = await execute_sql_entry("db1", make_entry(), "UPDATE t SET x=1")
-        token = first[0].text.split("confirm_token=")[1].split()[0].strip("`'\"")
+        token = _get_token(first)
+        _simulate_user_confirmation(server, token)
         await execute_sql_entry("db1", make_entry(), "UPDATE t SET x=1", confirm_token=token)
         replay = await execute_sql_entry("db1", make_entry(), "UPDATE t SET x=1", confirm_token=token)
     assert "令牌" in text_of(replay)

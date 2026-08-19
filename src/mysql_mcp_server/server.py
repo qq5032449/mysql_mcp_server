@@ -153,8 +153,9 @@ _KIND_LABELS = {"write": "写", "delete": "删除类"}
 # ---------------------------------------------------------------------------
 
 _TOKEN_TTL_SECONDS = 300  # 令牌有效期（5 分钟）
+_TOKEN_MIN_DELAY_SECONDS = 3.0  # 冷静期：签发后 3 秒内不可使用（防止跳过用户确认）
 
-_pending_tokens: dict[str, dict] = {}  # token -> {alias, sql, expires}
+_pending_tokens: dict[str, dict] = {}  # token -> {alias, sql, expires, not_before}
 _token_lock = anyio.Lock()
 
 
@@ -170,21 +171,34 @@ async def _issue_token(alias: str, query: str) -> str:
         expired = [t for t, v in _pending_tokens.items() if v["expires"] < _now()]
         for t in expired:
             del _pending_tokens[t]
-        _pending_tokens[token] = {"alias": alias, "sql": query, "expires": _now() + _TOKEN_TTL_SECONDS}
+        _pending_tokens[token] = {
+            "alias": alias,
+            "sql": query,
+            "expires": _now() + _TOKEN_TTL_SECONDS,
+            "not_before": _now() + _TOKEN_MIN_DELAY_SECONDS,
+        }
     return token
 
 
-async def _consume_token(token: str, alias: str, query: str) -> bool:
-    """校验并消费令牌：存在、未过期、别名与 SQL 均匹配才有效。"""
+async def _consume_token(token: str, alias: str, query: str) -> str:
+    """校验并消费令牌。
+
+    返回 'ok'（有效并已消费）| 'too_early'（冷静期内使用，令牌作废）
+    | 'invalid'（不存在/过期/不匹配）。
+    """
     async with _token_lock:
         info = _pending_tokens.get(token)
         if info is None or info["expires"] < _now():
             _pending_tokens.pop(token, None)
-            return False
+            return "invalid"
         if info["alias"] != alias or info["sql"] != query:
-            return False  # 不匹配不消费，等待正确调用或过期
+            return "invalid"  # 不匹配不消费，等待正确调用或过期
+        if _now() < info["not_before"]:
+            # 冷静期内回传：不可能已完成用户确认，令牌作废强制重走流程
+            del _pending_tokens[token]
+            return "too_early"
         del _pending_tokens[token]
-        return True
+        return "ok"
 
 
 async def execute_sql_entry(alias: str, entry: dict, query: str, confirm_token: str | None = None) -> list[TextContent]:
@@ -204,10 +218,18 @@ async def execute_sql_entry(alias: str, entry: dict, query: str, confirm_token: 
 
     # 携带令牌：校验通过则直接用操作账号执行（聊天内二次确认的第二步）
     if confirm_token:
-        if await _consume_token(confirm_token, alias, query):
+        verdict = await _consume_token(confirm_token, alias, query)
+        if verdict == "ok":
             result = await run_query_entry(entry, query, "write")
             audit.record(alias, sql_type, "token", query)
             return result
+        if verdict == "too_early":
+            audit.record(alias, sql_type, "token", query, status="token_too_early")
+            return [TextContent(type="text", text=(
+                "确认令牌在签发后 3 秒内不可使用——检测到未经过用户确认即尝试执行，该令牌已作废。"
+                "必须使用 AskUserQuestion 工具向用户完整展示 SQL 并获得明确授权；"
+                "用户同意后，重新调用（不带 confirm_token）获取新令牌，"
+                "待用户确认完成后再携带新令牌执行。"))]
         audit.record(alias, sql_type, "token", query, status="invalid_token")
         return [TextContent(type="text", text=(
             "确认令牌无效、已过期或与本条 SQL 不匹配。"
