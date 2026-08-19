@@ -1,4 +1,3 @@
-import json
 import pytest
 from unittest.mock import patch, MagicMock
 from starlette.testclient import TestClient
@@ -13,7 +12,9 @@ def app(tmp_path, monkeypatch):
     monkeypatch.setattr(audit, "LOG_DIR", tmp_path)
     db_config.reset_cache()
     audit.clear()
+    admin_api._on_change_callbacks[:] = []
     yield admin_api.create_admin_app()
+    admin_api._on_change_callbacks[:] = []
     db_config.reset_cache()
 
 
@@ -41,6 +42,42 @@ class TestLoopbackGuard:
     def test_non_loopback_forbidden(self, app, no_env):
         c = TestClient(app, client=("10.0.0.5", 50000))
         r = c.get("/api/databases")
+        assert r.status_code == 403
+
+
+class TestOnChange:
+    def test_callbacks_called_on_create_update_delete(self, client, no_env):
+        calls = []
+        admin_api.register_on_change(lambda alias: calls.append(alias))
+        client.post("/api/databases", json=payload("db1"))
+        client.put("/api/databases/db1", json=payload("db1"))
+        client.delete("/api/databases/db1")
+        assert calls == ["db1", "db1", "db1"]
+
+    def test_callback_exception_does_not_break_api(self, client, no_env):
+        def bad_cb(alias):
+            raise RuntimeError("boom")
+        admin_api.register_on_change(bad_cb)
+        r = client.post("/api/databases", json=payload("db9"))
+        assert r.status_code == 201
+
+    def test_malformed_ssh_port_returns_400(self, client, no_env):
+        body = payload()
+        body["ssh"] = {"enable": True, "host": "h", "port": "abc"}
+        r = client.post("/api/databases", json=body)
+        assert r.status_code == 400
+        assert "ssh 端口" in r.json()["error"]
+
+
+class TestMiddleware:
+    def test_static_files_guarded(self, app, no_env):
+        # static 目录暂不存在，但守卫应在 404 之前拦截
+        c = TestClient(app, client=("10.0.0.5", 50000))
+        r = c.get("/admin/anything")
+        assert r.status_code == 403
+
+    def test_bad_host_header_rejected(self, client, no_env):
+        r = client.get("/api/health", headers={"Host": "evil.example.com"})
         assert r.status_code == 403
 
 
@@ -141,8 +178,6 @@ class TestConnection:
 
     def test_failure_detail(self, client, no_env):
         client.post("/api/databases", json=payload())
-        err = MagicMock()
-        err.msg = "Access denied"
         with patch("mysql_mcp_server.admin_api.mysql.connector.connect",
                    side_effect=type("E", (Exception,), {"msg": "Access denied"})):
             r = client.post("/api/databases/db1/test", json={})
