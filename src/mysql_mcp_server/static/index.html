@@ -1,0 +1,392 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MySQL MCP 管理页面</title>
+<style>
+  :root { --line:#e2e8f0; --muted:#64748b; --blue:#2563eb; --red:#dc2626; --green:#16a34a; }
+  * { box-sizing:border-box; margin:0; padding:0; }
+  body { font-family:system-ui,-apple-system,"Segoe UI","Microsoft YaHei",sans-serif;
+         background:#f1f5f9; color:#0f172a; padding:24px; max-width:1100px; margin:0 auto; }
+  h1 { font-size:20px; margin-bottom:16px; display:flex; align-items:center; gap:10px; }
+  .dot { width:10px; height:10px; border-radius:50%; background:var(--green); display:inline-block; }
+  .card { background:#fff; border:1px solid var(--line); border-radius:10px; padding:16px; margin-bottom:16px; }
+  .card h2 { font-size:15px; margin-bottom:12px; display:flex; align-items:center; gap:10px; }
+  .card h2 .btn { margin-left:auto; }
+  .btn { border:1px solid var(--line); background:#fff; border-radius:6px; padding:5px 10px;
+         font-size:12px; cursor:pointer; color:#0f172a; }
+  .btn:hover { background:#f8fafc; }
+  .btn.primary { background:var(--blue); border-color:var(--blue); color:#fff; }
+  .btn.danger { color:var(--red); border-color:var(--red); }
+  .btn.danger:hover { background:#fef2f2; }
+  .badge { font-size:11px; padding:2px 8px; border-radius:999px; background:#eff6ff;
+           color:var(--blue); border:1px solid #bfdbfe; white-space:nowrap; }
+  .badge.default { background:#f0fdf4; color:var(--green); border-color:#bbf7d0; }
+  .badge.danger { background:#fef2f2; color:var(--red); border-color:#fecaca; }
+  .db-item { border:1px solid var(--line); border-radius:8px; padding:12px; margin-bottom:10px; }
+  .db-head { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+  .db-alias { font-weight:600; font-size:14px; }
+  .db-meta { color:var(--muted); font-size:12px; margin-top:6px; }
+  .db-actions { margin-left:auto; display:flex; gap:6px; flex-wrap:wrap; }
+  .sse-row { font-size:13px; margin-bottom:6px; }
+  .code { font-family:Consolas,Menlo,monospace; background:#f8fafc; border:1px solid var(--line);
+          padding:2px 6px; border-radius:4px; cursor:pointer; }
+  .code:hover { border-color:var(--blue); }
+  .hint { color:var(--muted); font-size:12px; margin-top:10px; line-height:1.7; }
+  table { width:100%; border-collapse:collapse; font-size:12px; }
+  th, td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); vertical-align:top; }
+  th { color:var(--muted); font-weight:500; white-space:nowrap; }
+  td.sql { font-family:Consolas,Menlo,monospace; max-width:320px; overflow:hidden;
+           text-overflow:ellipsis; white-space:nowrap; }
+  .empty { color:var(--muted); font-size:13px; padding:14px 0; text-align:center; }
+  .mask { position:fixed; inset:0; background:rgba(15,23,42,.45); display:flex;
+          align-items:center; justify-content:center; z-index:10; }
+  .mask.hidden { display:none; }
+  .modal { background:#fff; border-radius:10px; padding:20px; width:580px; max-width:94vw;
+           max-height:92vh; overflow:auto; }
+  .modal h2 { font-size:16px; margin-bottom:14px; }
+  fieldset { border:1px solid var(--line); border-radius:8px; padding:10px 12px; margin-bottom:12px; }
+  legend { font-size:12px; color:var(--muted); padding:0 4px; }
+  .grid { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+  .grid .full { grid-column:1 / -1; }
+  label { font-size:12px; display:block; margin-bottom:3px; color:#334155; }
+  label.inline { display:flex; align-items:center; gap:6px; }
+  input, select { width:100%; padding:6px 8px; border:1px solid var(--line); border-radius:6px; font-size:13px; }
+  input[type=checkbox] { width:auto; }
+  input:focus, select:focus { outline:2px solid #bfdbfe; border-color:var(--blue); }
+  input[readonly] { background:#f8fafc; color:var(--muted); }
+  .warn { color:var(--red); font-size:12px; display:block; margin-top:4px; }
+  .error { color:var(--red); font-size:13px; margin-top:8px; white-space:pre-wrap; }
+  .modal-actions { display:flex; justify-content:flex-end; gap:8px; margin-top:12px; }
+  details { border:1px dashed var(--line); border-radius:8px; padding:10px 12px; }
+  summary { font-size:13px; color:var(--muted); cursor:pointer; margin-bottom:10px; }
+</style>
+</head>
+<body>
+<h1><span class="dot"></span>MySQL MCP 管理页面</h1>
+
+<div class="card">
+  <h2>数据库列表 <button class="btn primary" id="btnAdd">＋ 添加数据库</button></h2>
+  <div id="dbList"><p class="empty">加载中…</p></div>
+</div>
+
+<div class="card">
+  <h2>客户端接入说明</h2>
+  <div id="sseList"><p class="empty">加载中…</p></div>
+  <p class="hint">
+    点击上方地址即可复制。在 <b>TRAE</b> 中：MCP 市场 → 添加自定义服务器 → 类型选 SSE，URL 填上述地址。<br>
+    在 <b>Claude Desktop</b> 中：编辑 claude_desktop_config.json，于 mcpServers 内配置
+    <span class="code">{"type":"sse","url":"http://127.0.0.1:8000/sse?alias=别名"}</span>。
+  </p>
+</div>
+
+<div class="card">
+  <h2>写操作审计 <button class="btn" id="btnRefreshAudit">刷新</button></h2>
+  <table>
+    <thead><tr><th>时间</th><th>别名</th><th>类型</th><th>确认通道</th><th>状态</th><th>SQL</th></tr></thead>
+    <tbody id="auditBody"></tbody>
+  </table>
+  <p class="empty" id="auditEmpty">暂无写操作记录</p>
+</div>
+
+<div class="mask hidden" id="modalMask">
+  <div class="modal">
+    <h2 id="modalTitle">添加数据库</h2>
+    <form id="dbForm" onsubmit="return false">
+      <fieldset>
+        <legend>基本信息</legend>
+        <div class="grid">
+          <div><label>别名 *</label><input id="f_alias" required placeholder="prod_main"></div>
+          <div><label>主机 *</label><input id="f_host" required placeholder="localhost"></div>
+          <div><label>端口</label><input id="f_port" placeholder="3306"></div>
+          <div><label>数据库名</label><input id="f_database" placeholder="mydb"></div>
+          <div><label>字符集</label><input id="f_charset" placeholder="utf8mb4"></div>
+        </div>
+      </fieldset>
+      <fieldset>
+        <legend>查询用户（只读）</legend>
+        <div class="grid">
+          <div><label>用户名 *</label><input id="f_read_user" required></div>
+          <div><label>密码</label><input id="f_read_pass" type="password"></div>
+        </div>
+      </fieldset>
+      <fieldset>
+        <legend>操作用户（读写）</legend>
+        <div class="grid">
+          <div><label>用户名 *</label><input id="f_write_user" required></div>
+          <div><label>密码</label><input id="f_write_pass" type="password"></div>
+        </div>
+      </fieldset>
+      <fieldset>
+        <legend>权限策略</legend>
+        <div class="grid">
+          <div>
+            <label>写操作策略</label>
+            <select id="f_write_policy">
+              <option value="client_confirm">client_confirm（客户端确认）</option>
+              <option value="elicitation_only">elicitation_only（仅服务端确认）</option>
+            </select>
+          </div>
+          <div>
+            <label class="inline"><input type="checkbox" id="f_allow_delete"> 允许删除操作</label>
+            <span class="warn">⚠ 开启后写账号可执行 DELETE / TRUNCATE，数据不可恢复，请谨慎！</span>
+          </div>
+        </div>
+      </fieldset>
+      <details id="detailsSsh">
+        <summary>高级：SSH 隧道（可选）</summary>
+        <div class="grid">
+          <div><label class="inline"><input type="checkbox" id="f_ssh_enable"> 启用 SSH 隧道</label></div>
+          <div><label>SSH 主机</label><input id="f_ssh_host"></div>
+          <div><label>SSH 端口</label><input id="f_ssh_port" placeholder="22"></div>
+          <div><label>SSH 用户</label><input id="f_ssh_user"></div>
+          <div><label>密钥路径</label><input id="f_ssh_key_path" placeholder="~/.ssh/id_rsa"></div>
+          <div><label>本地端口</label><input id="f_ssh_local_port" placeholder="3330"></div>
+        </div>
+      </details>
+    </form>
+    <div class="error" id="formError"></div>
+    <div class="modal-actions">
+      <button type="button" class="btn" id="btnCancel">取消</button>
+      <button type="button" class="btn" id="btnTestRead">测试连接（读账号）</button>
+      <button type="button" class="btn primary" id="btnSave">保存</button>
+    </div>
+  </div>
+</div>
+
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? "").replace(/[&<>"']/g,
+  c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const POLICY_LABEL = {
+  client_confirm: "client_confirm（客户端确认）",
+  elicitation_only: "elicitation_only（仅服务端确认）",
+};
+
+let dbs = { default_alias: null, databases: {} };
+let editingAlias = null;
+
+async function api(path, opts = {}) {
+  const r = await fetch(path, { headers: { "Content-Type": "application/json" }, ...opts });
+  let body = null;
+  try { body = await r.json(); } catch (_) {}
+  if (!r.ok) throw new Error((body && body.error) || r.statusText || "请求失败");
+  return body;
+}
+
+/* ---------- 数据库列表 ---------- */
+async function loadDbs() {
+  dbs = await api("/api/databases");
+  renderDbs();
+  renderSse();
+}
+
+function renderDbs() {
+  const box = $("dbList");
+  const aliases = Object.keys(dbs.databases).sort();
+  if (!aliases.length) {
+    box.innerHTML = '<p class="empty">暂无数据库配置，点击右上角"添加数据库"开始</p>';
+    return;
+  }
+  box.innerHTML = aliases.map(a => {
+    const d = dbs.databases[a];
+    const isDefault = dbs.default_alias === a;
+    return `<div class="db-item">
+      <div class="db-head">
+        <span class="db-alias">${esc(a)}</span>
+        ${isDefault
+          ? '<span class="badge default">默认</span>'
+          : `<button class="btn" onclick="setDefault('${esc(a)}')">设为默认</button>`}
+        ${d.allow_delete ? '<span class="badge danger">删除权限: 开 ⚠</span>' : ""}
+        <span class="db-actions">
+          <button class="btn" onclick="openModal('${esc(a)}')">编辑</button>
+          <button class="btn" onclick="testExisting('${esc(a)}', false)">测试连接</button>
+          <button class="btn" onclick="testExisting('${esc(a)}', true)">测试写账号</button>
+          <button class="btn danger" onclick="removeDb('${esc(a)}')">删除</button>
+        </span>
+      </div>
+      <div class="db-meta">${esc(d.host)}:${esc(d.port)}/${esc(d.database || "-")}
+        · 读: ${esc(d.read_user.user)} · 写: ${esc(d.write_user.user)}
+        · 写策略: ${esc(POLICY_LABEL[d.write_policy] || d.write_policy)}</div>
+    </div>`;
+  }).join("");
+}
+
+/* ---------- 客户端接入说明 ---------- */
+function renderSse() {
+  const box = $("sseList");
+  const aliases = Object.keys(dbs.databases).sort();
+  if (!aliases.length) {
+    box.innerHTML = '<p class="empty">暂无数据库配置</p>';
+    return;
+  }
+  box.innerHTML = aliases.map(a => {
+    const url = "http://127.0.0.1:8000/sse?alias=" + encodeURIComponent(a);
+    return `<div class="sse-row">${esc(a)} →
+      <span class="code" data-url="${esc(url)}" onclick="copySse(this)">${esc(url)}</span></div>`;
+  }).join("");
+}
+
+function copySse(el) {
+  const text = el.dataset.url;
+  navigator.clipboard.writeText(text).then(
+    () => alert("已复制: " + text),
+    () => alert("复制失败，请手动选择复制: " + text)
+  );
+}
+
+/* ---------- 写操作审计 ---------- */
+async function loadAudit() {
+  const entries = await api("/api/audit");
+  const rows = [...entries].reverse();  // 最新在前
+  $("auditEmpty").style.display = rows.length ? "none" : "";
+  $("auditBody").innerHTML = rows.map(e => `<tr>
+    <td>${esc(e.time)}</td><td>${esc(e.alias)}</td><td>${esc(e.type)}</td>
+    <td>${esc(e.channel)}</td><td>${esc(e.status)}</td>
+    <td class="sql" title="${esc(e.sql)}">${esc(e.sql)}</td>
+  </tr>`).join("");
+}
+
+/* ---------- 添加 / 编辑模态框 ---------- */
+function openModal(alias) {
+  editingAlias = alias || null;
+  $("formError").textContent = "";
+  $("modalTitle").textContent = alias ? "编辑数据库：" + alias : "添加数据库";
+  $("dbForm").reset();
+  $("f_alias").readOnly = !!alias;
+  const passPh = alias ? "留空表示不修改" : "";
+  $("f_read_pass").placeholder = passPh;
+  $("f_write_pass").placeholder = passPh;
+  $("detailsSsh").open = false;
+  if (alias) {
+    const d = dbs.databases[alias] || {};
+    $("f_alias").value = alias;
+    $("f_host").value = d.host || "";
+    $("f_port").value = d.port ?? "";
+    $("f_database").value = d.database || "";
+    $("f_charset").value = d.charset || "";
+    $("f_read_user").value = (d.read_user || {}).user || "";
+    $("f_write_user").value = (d.write_user || {}).user || "";
+    $("f_write_policy").value = d.write_policy || "client_confirm";
+    $("f_allow_delete").checked = !!d.allow_delete;
+    const s = d.ssh || {};
+    $("f_ssh_enable").checked = !!s.enable;
+    $("f_ssh_host").value = s.host || "";
+    $("f_ssh_port").value = s.port ?? "";
+    $("f_ssh_user").value = s.user || "";
+    $("f_ssh_key_path").value = s.key_path || "";
+    $("f_ssh_local_port").value = s.local_port ?? "";
+    $("detailsSsh").open = !!s.enable;
+  }
+  $("modalMask").classList.remove("hidden");
+}
+
+function closeModal() { $("modalMask").classList.add("hidden"); }
+
+function collectForm() {
+  if (!$("dbForm").reportValidity()) return null;
+  const val = id => $(id).value.trim();
+  const num = (id, fb) => {
+    const v = val(id);
+    if (v === "") return fb;
+    const n = Number(v);
+    return Number.isFinite(n) ? n : v;  // 非法值交给后端返回 400 中文提示
+  };
+  return {
+    alias: val("f_alias"),
+    host: val("f_host"),
+    port: num("f_port", 3306),
+    database: val("f_database") || null,
+    charset: val("f_charset") || "utf8mb4",
+    read_user: { user: val("f_read_user"), password: $("f_read_pass").value },
+    write_user: { user: val("f_write_user"), password: $("f_write_pass").value },
+    write_policy: $("f_write_policy").value,
+    allow_delete: $("f_allow_delete").checked,
+    ssh: {
+      enable: $("f_ssh_enable").checked,
+      host: val("f_ssh_host") || null,
+      port: num("f_ssh_port", 22),
+      user: val("f_ssh_user") || null,
+      key_path: val("f_ssh_key_path") || null,
+      local_port: num("f_ssh_local_port", 3330),
+    },
+  };
+}
+
+async function doSave() {
+  const data = collectForm();
+  if (!data) return null;
+  if (editingAlias) {
+    await api("/api/databases/" + encodeURIComponent(editingAlias),
+              { method: "PUT", body: JSON.stringify(data) });
+  } else {
+    await api("/api/databases", { method: "POST", body: JSON.stringify(data) });
+  }
+  return data.alias;
+}
+
+async function testConn(alias, asWrite) {
+  return api("/api/databases/" + encodeURIComponent(alias) + "/test",
+             { method: "POST", body: JSON.stringify({ as_write: !!asWrite }) });
+}
+
+async function testExisting(alias, asWrite) {
+  const label = asWrite ? "写账号" : "读账号";
+  try {
+    const r = await testConn(alias, asWrite);
+    if (r.ok) alert(label + "连接成功：" + alias);
+    else alert(label + "连接失败：" + (r.error || "未知错误"));
+  } catch (e) { alert("测试请求失败：" + e.message); }
+}
+
+async function removeDb(alias) {
+  if (!confirm('确定删除数据库配置 "' + alias + '" 吗？')) return;
+  try { await api("/api/databases/" + encodeURIComponent(alias), { method: "DELETE" }); loadDbs(); }
+  catch (e) { alert("删除失败：" + e.message); }
+}
+
+async function setDefault(alias) {
+  try {
+    await api("/api/settings", { method: "PUT", body: JSON.stringify({ default_alias: alias }) });
+    loadDbs();
+  } catch (e) { alert("设置失败：" + e.message); }
+}
+
+/* ---------- 事件绑定与初始化 ---------- */
+$("btnAdd").onclick = () => openModal(null);
+$("btnCancel").onclick = closeModal;
+$("modalMask").onclick = e => { if (e.target === $("modalMask")) closeModal(); };
+$("btnRefreshAudit").onclick = () => loadAudit().catch(e => alert("刷新失败：" + e.message));
+
+$("btnSave").onclick = async () => {
+  $("formError").textContent = "";
+  try {
+    await doSave();
+    closeModal();
+    loadDbs();
+  } catch (e) { $("formError").textContent = e.message; }
+};
+
+$("btnTestRead").onclick = async () => {
+  $("formError").textContent = "";
+  try {
+    const alias = await doSave();          // 先保存（失败则显示错误并中止）
+    if (alias === null) return;
+    const r = await testConn(alias, false);
+    if (r.ok) {
+      alert("读账号连接成功：" + alias);
+      closeModal();
+      loadDbs();
+    } else {
+      $("formError").textContent = "配置已保存，但读账号连接失败：" + (r.error || "未知错误");
+    }
+  } catch (e) { $("formError").textContent = e.message; }
+};
+
+loadDbs().catch(e => { $("dbList").innerHTML = '<p class="empty">加载失败：' + esc(e.message) + "</p>"; });
+loadAudit().catch(e => { $("auditEmpty").textContent = "加载失败：" + e.message; });
+</script>
+</body>
+</html>

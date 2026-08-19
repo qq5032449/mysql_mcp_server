@@ -200,3 +200,10 @@ class TestAuditHealth:
         assert r.status_code == 200
         assert r.json()["status"] == "ok"
         assert r.json()["databases"] == 1
+
+
+class TestAdminPage:
+    def test_admin_index_served(self, client, no_env):
+        r = client.get("/admin/")
+        assert r.status_code == 200
+        assert "MySQL MCP 管理页面" in r.text
