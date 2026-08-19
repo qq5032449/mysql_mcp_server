@@ -216,6 +216,12 @@ async def execute_sql_entry(alias: str, entry: dict, query: str, confirm_token: 
         audit.record(alias, sql_type, "-", query, status="rejected_delete_disabled")
         return [TextContent(type="text", text="该别名未开启删除权限，请在管理页面开启后重试。")]
 
+    # skip_confirm 开启：写操作（不含删除类）免二次确认直接执行
+    if kind == "write" and entry.get("skip_confirm"):
+        result = await run_query_entry(entry, query, "write")
+        audit.record(alias, sql_type, "skip_confirm", query)
+        return result
+
     # 携带令牌：校验通过则直接用操作账号执行（聊天内二次确认的第二步）
     if confirm_token:
         verdict = await _consume_token(confirm_token, alias, query)

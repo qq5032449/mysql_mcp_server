@@ -137,7 +137,12 @@ class TestNormalize:
         assert out["charset"] == "utf8mb4"
         assert out["write_policy"] == "client_confirm"
         assert out["allow_delete"] is False
+        assert out["skip_confirm"] is False
         assert out["port"] == 3306
+
+    def test_skip_confirm_normalized(self, no_env):
+        out = db_config.normalize_entry(entry(skip_confirm=True))
+        assert out["skip_confirm"] is True
 
     def test_ssh_port_bad_int_chinese_error(self, no_env):
         with pytest.raises(ValueError, match="ssh 端口必须是整数"):

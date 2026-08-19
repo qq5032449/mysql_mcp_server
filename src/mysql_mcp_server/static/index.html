@@ -24,6 +24,7 @@
            color:var(--blue); border:1px solid #bfdbfe; white-space:nowrap; }
   .badge.default { background:#f0fdf4; color:var(--green); border-color:#bbf7d0; }
   .badge.danger { background:#fef2f2; color:var(--red); border-color:#fecaca; }
+  .badge.warn { background:#fffbeb; color:#b45309; border-color:#fde68a; }
   .db-item { border:1px solid var(--line); border-radius:8px; padding:12px; margin-bottom:10px; }
   .db-head { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
   .db-alias { font-weight:600; font-size:14px; }
@@ -129,8 +130,12 @@
             </select>
           </div>
           <div>
+            <label class="inline"><input type="checkbox" id="f_skip_confirm"> UPDATE 等写操作免二次确认</label>
+            <span class="warn">⚠ 开启后 INSERT/UPDATE/CREATE/ALTER 等写操作无需用户确认直接执行（删除类仍需确认与删除权限）</span>
+          </div>
+          <div>
             <label class="inline"><input type="checkbox" id="f_allow_delete"> 允许删除操作</label>
-            <span class="warn">⚠ 开启后写账号可执行 DELETE / TRUNCATE，数据不可恢复，请谨慎！</span>
+            <span class="warn">⚠ 开启后写账号可执行 DELETE / TRUNCATE / DROP（改表字段、新建表、删除表），数据不可恢复，请谨慎！</span>
           </div>
         </div>
       </fieldset>
@@ -168,6 +173,8 @@ const POLICY_LABEL = {
 let dbs = { default_alias: null, databases: {} };
 let editingAlias = null;
 
+let _tokenPrompting = null; // 并发 401 时只弹一次输入框
+
 async function api(path, opts = {}) {
   const headers = { "Content-Type": "application/json", ...(opts.headers || {}) };
   const token = localStorage.getItem("adminToken");
@@ -176,18 +183,28 @@ async function api(path, opts = {}) {
   let body = null;
   try { body = await r.json(); } catch (_) {}
   if (r.status === 401) {
-    // 局域网访问需要令牌：引导输入并重试一次
-    const t = prompt("访问管理 API 需要令牌（ADMIN_TOKEN），请输入：");
-    if (t) {
-      localStorage.setItem("adminToken", t);
-      headers["X-Admin-Token"] = t;
-      const r2 = await fetch(path, { ...opts, headers });
-      let b2 = null;
-      try { b2 = await r2.json(); } catch (_) {}
-      if (!r2.ok) throw new Error((b2 && b2.error) || r2.statusText || "令牌无效");
-      return b2;
+    // 局域网访问需要令牌：并发请求共享同一次输入
+    if (!_tokenPrompting) {
+      _tokenPrompting = (async () => {
+        const t = prompt("访问管理 API 需要令牌（ADMIN_TOKEN），请输入：");
+        if (t) localStorage.setItem("adminToken", t);
+        else localStorage.removeItem("adminToken");
+        return t;
+      })();
     }
-    throw new Error("未提供访问令牌");
+    const t = await _tokenPrompting;
+    _tokenPrompting = null;
+    if (!t) throw new Error("未提供访问令牌");
+    headers["X-Admin-Token"] = t;
+    const r2 = await fetch(path, { ...opts, headers });
+    let b2 = null;
+    try { b2 = await r2.json(); } catch (_) {}
+    if (r2.status === 401) {
+      localStorage.removeItem("adminToken"); // 令牌无效，清除避免下次继续用
+      throw new Error((b2 && b2.error) || "令牌无效");
+    }
+    if (!r2.ok) throw new Error((b2 && b2.error) || r2.statusText || "请求失败");
+    return b2;
   }
   if (!r.ok) throw new Error((body && body.error) || r.statusText || "请求失败");
   return body;
@@ -217,6 +234,7 @@ function renderDbs() {
           ? '<span class="badge default">默认</span>'
           : `<button class="btn" onclick="setDefault('${esc(a)}')">设为默认</button>`}
         ${d.allow_delete ? '<span class="badge danger">删除权限: 开 ⚠</span>' : ""}
+        ${d.skip_confirm ? '<span class="badge warn">写免确认: 开</span>' : ""}
         <span class="db-actions">
           <button class="btn" onclick="openModal('${esc(a)}')">编辑</button>
           <button class="btn" onclick="testExisting('${esc(a)}', false)">测试连接</button>
@@ -288,6 +306,7 @@ function openModal(alias) {
     $("f_write_user").value = (d.write_user || {}).user || "";
     $("f_write_policy").value = d.write_policy || "client_confirm";
     $("f_allow_delete").checked = !!d.allow_delete;
+    $("f_skip_confirm").checked = !!d.skip_confirm;
     const s = d.ssh || {};
     $("f_ssh_enable").checked = !!s.enable;
     $("f_ssh_host").value = s.host || "";
@@ -321,6 +340,7 @@ function collectForm() {
     write_user: { user: val("f_write_user"), password: $("f_write_pass").value },
     write_policy: $("f_write_policy").value,
     allow_delete: $("f_allow_delete").checked,
+    skip_confirm: $("f_skip_confirm").checked,
     ssh: {
       enable: $("f_ssh_enable").checked,
       host: val("f_ssh_host") || null,

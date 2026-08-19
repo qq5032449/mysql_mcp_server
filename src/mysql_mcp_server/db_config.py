@@ -141,6 +141,7 @@ def normalize_entry(entry: dict) -> dict:
         "write_user": _acct("write_user"),
         "write_policy": entry.get("write_policy", "client_confirm"),
         "allow_delete": bool(entry.get("allow_delete", False)),
+        "skip_confirm": bool(entry.get("skip_confirm", False)),
         "ssh": {
             "enable": bool(ssh.get("enable", False)),
             "host": ssh.get("host"),

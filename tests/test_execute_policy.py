@@ -13,10 +13,44 @@ def make_entry(**kw):
         "sql_mode": "TRADITIONAL", "connect_timeout": 10,
         "read_user": {"user": "reader", "password": "rp"},
         "write_user": {"user": "writer", "password": "wp"},
-        "write_policy": "client_confirm", "allow_delete": False,
+        "write_policy": "client_confirm", "allow_delete": False, "skip_confirm": False,
     }
     base.update(kw)
     return base
+
+
+@pytest.mark.asyncio
+async def test_write_skip_confirm_executes_directly():
+    """skip_confirm 开启：写操作免二次确认，直接用 write 账号执行并审计。"""
+    ok = TextContent(type="text", text="done")
+    with patch("mysql_mcp_server.server.elicit_confirm", new=AsyncMock()) as ec, \
+         patch("mysql_mcp_server.server.run_query_entry", new=AsyncMock(return_value=[ok])) as rq:
+        result = await execute_sql_entry("db1", make_entry(skip_confirm=True), "UPDATE t SET x=1")
+    assert text_of(result) == "done"
+    assert rq.await_args.args[2] == "write"
+    ec.assert_not_awaited()  # 完全跳过确认通道
+
+
+@pytest.mark.asyncio
+async def test_delete_not_affected_by_skip_confirm():
+    """skip_confirm 不放宽删除门槛：DELETE 仍受 allow_delete 控制。"""
+    with patch("mysql_mcp_server.server.elicit_confirm", new=AsyncMock()) as ec:
+        result = await execute_sql_entry("db1", make_entry(skip_confirm=True, allow_delete=False), "DELETE FROM t")
+    assert "未开启删除权限" in text_of(result)
+    ec.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_ddl_allowed_with_confirm(tmp_path, monkeypatch):
+    """问题3：确认后允许 DDL（改表结构/建表）——ALTER/CREATE 走正常确认后执行。"""
+    ok = TextContent(type="text", text="done")
+    with patch("mysql_mcp_server.server.elicit_confirm", new=AsyncMock(return_value="accept")), \
+         patch("mysql_mcp_server.server.run_query_entry", new=AsyncMock(return_value=[ok])) as rq:
+        r1 = await execute_sql_entry("db1", make_entry(), "ALTER TABLE t ADD COLUMN c INT")
+        r2 = await execute_sql_entry("db1", make_entry(), "CREATE TABLE t2 (id INT)")
+    assert text_of(r1) == "done"
+    assert text_of(r2) == "done"
+    assert rq.await_args_list[0].args[2] == "write"
 
 
 class TestBuildConnectorConfig:
