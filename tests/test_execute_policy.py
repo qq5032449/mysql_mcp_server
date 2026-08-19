@@ -86,13 +86,90 @@ async def test_write_elicitation_decline():
 
 
 @pytest.mark.asyncio
-async def test_write_fallback_client_confirm():
+async def test_write_fallback_issues_token():
+    """无 elicitation 且 client_confirm：不执行，签发一次性令牌要求二次确认。"""
+    from mysql_mcp_server import server
+    server._pending_tokens.clear()
+    with patch("mysql_mcp_server.server.elicit_confirm", new=AsyncMock(return_value=None)), \
+         patch("mysql_mcp_server.server.run_query_entry", new=AsyncMock()) as rq:
+        result = await execute_sql_entry("db1", make_entry(write_policy="client_confirm"), "INSERT INTO t VALUES (1)")
+    text = text_of(result)
+    assert "confirm_token" in text
+    assert "INSERT INTO t VALUES (1)" in text
+    rq.assert_not_awaited()
+    assert len(server._pending_tokens) == 1
+
+
+@pytest.mark.asyncio
+async def test_token_confirm_executes():
+    """携带有效令牌 → 用 write 账号执行，令牌消费。"""
+    from mysql_mcp_server import server
+    server._pending_tokens.clear()
     ok = TextContent(type="text", text="done")
     with patch("mysql_mcp_server.server.elicit_confirm", new=AsyncMock(return_value=None)), \
          patch("mysql_mcp_server.server.run_query_entry", new=AsyncMock(return_value=[ok])) as rq:
-        result = await execute_sql_entry("db1", make_entry(write_policy="client_confirm"), "INSERT INTO t VALUES (1)")
-    assert text_of(result) == "done"
+        first = await execute_sql_entry("db1", make_entry(), "UPDATE t SET x=1")
+        token = first[0].text.split("confirm_token=")[1].split()[0].strip("`'\"")
+        second = await execute_sql_entry("db1", make_entry(), "UPDATE t SET x=1", confirm_token=token)
+    assert text_of(second) == "done"
     assert rq.await_args.args[2] == "write"
+    assert len(server._pending_tokens) == 0  # 已消费
+
+
+@pytest.mark.asyncio
+async def test_token_replay_rejected():
+    from mysql_mcp_server import server
+    server._pending_tokens.clear()
+    ok = TextContent(type="text", text="done")
+    with patch("mysql_mcp_server.server.elicit_confirm", new=AsyncMock(return_value=None)), \
+         patch("mysql_mcp_server.server.run_query_entry", new=AsyncMock(return_value=[ok])):
+        first = await execute_sql_entry("db1", make_entry(), "UPDATE t SET x=1")
+        token = first[0].text.split("confirm_token=")[1].split()[0].strip("`'\"")
+        await execute_sql_entry("db1", make_entry(), "UPDATE t SET x=1", confirm_token=token)
+        replay = await execute_sql_entry("db1", make_entry(), "UPDATE t SET x=1", confirm_token=token)
+    assert "令牌" in text_of(replay)
+
+
+@pytest.mark.asyncio
+async def test_token_wrong_sql_rejected():
+    """令牌仅对签发时的同一条 SQL 有效。"""
+    from mysql_mcp_server import server
+    server._pending_tokens.clear()
+    ok = TextContent(type="text", text="done")
+    with patch("mysql_mcp_server.server.elicit_confirm", new=AsyncMock(return_value=None)), \
+         patch("mysql_mcp_server.server.run_query_entry", new=AsyncMock(return_value=[ok])):
+        first = await execute_sql_entry("db1", make_entry(), "UPDATE t SET x=1")
+        token = first[0].text.split("confirm_token=")[1].split()[0].strip("`'\"")
+        other = await execute_sql_entry("db1", make_entry(), "UPDATE t SET x=999", confirm_token=token)
+    assert "令牌" in text_of(other)
+
+
+@pytest.mark.asyncio
+async def test_token_wrong_alias_rejected():
+    from mysql_mcp_server import server
+    server._pending_tokens.clear()
+    ok = TextContent(type="text", text="done")
+    with patch("mysql_mcp_server.server.elicit_confirm", new=AsyncMock(return_value=None)), \
+         patch("mysql_mcp_server.server.run_query_entry", new=AsyncMock(return_value=[ok])):
+        first = await execute_sql_entry("db1", make_entry(), "UPDATE t SET x=1")
+        token = first[0].text.split("confirm_token=")[1].split()[0].strip("`'\"")
+        other = await execute_sql_entry("db2", make_entry(), "UPDATE t SET x=1", confirm_token=token)
+    assert "令牌" in text_of(other)
+
+
+@pytest.mark.asyncio
+async def test_token_expired_rejected():
+    from mysql_mcp_server import server
+    server._pending_tokens.clear()
+    ok = TextContent(type="text", text="done")
+    with patch("mysql_mcp_server.server.elicit_confirm", new=AsyncMock(return_value=None)), \
+         patch("mysql_mcp_server.server.run_query_entry", new=AsyncMock(return_value=[ok])):
+        first = await execute_sql_entry("db1", make_entry(), "UPDATE t SET x=1")
+        token = first[0].text.split("confirm_token=")[1].split()[0].strip("`'\"")
+        # 手动把令牌置为过期
+        server._pending_tokens[token]["expires"] = 0.0
+        expired = await execute_sql_entry("db1", make_entry(), "UPDATE t SET x=1", confirm_token=token)
+    assert "令牌" in text_of(expired)
 
 
 @pytest.mark.asyncio
@@ -115,16 +192,19 @@ async def test_delete_allowed_with_confirm():
 
 
 @pytest.mark.asyncio
-async def test_audit_recorded_on_client_fallback(tmp_path, monkeypatch):
-    from mysql_mcp_server import audit as audit_mod
+async def test_audit_recorded_on_token_fallback(tmp_path, monkeypatch):
+    """无 elicitation + client_confirm：签发令牌时审计 pending_token。"""
+    from mysql_mcp_server import audit as audit_mod, server
     monkeypatch.setattr(audit_mod, "LOG_DIR", tmp_path)
     audit_mod.clear()
+    server._pending_tokens.clear()
     ok = TextContent(type="text", text="done")
     with patch("mysql_mcp_server.server.elicit_confirm", new=AsyncMock(return_value=None)), \
          patch("mysql_mcp_server.server.run_query_entry", new=AsyncMock(return_value=[ok])):
         await execute_sql_entry("db1", make_entry(), "UPDATE t SET x=1")
     entries = audit_mod.list_entries()
-    assert entries[-1]["channel"] == "client"
+    assert entries[-1]["channel"] == "token"
+    assert entries[-1]["status"] == "pending_token"
     assert entries[-1]["type"] == "UPDATE"
 
 

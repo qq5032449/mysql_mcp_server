@@ -128,6 +128,9 @@ async def elicit_confirm(alias: str, kind_label: str, query: str, timeout: float
     params = session.client_params
     caps = params.capabilities if params else None
     if not caps or not caps.elicitation:
+        # 诊断日志：确认客户端握手时未声明 elicitation 能力（写操作将按策略降级）
+        caps_summary = caps.model_dump(exclude_none=True) if caps else None
+        logger.info(f"Client lacks elicitation capability; write will degrade by write_policy. client_caps={caps_summary}")
         return None
     try:
         with anyio.move_on_after(timeout):
@@ -144,9 +147,48 @@ async def elicit_confirm(alias: str, kind_label: str, query: str, timeout: float
 
 _KIND_LABELS = {"write": "写", "delete": "删除类"}
 
+# ---------------------------------------------------------------------------
+# 聊天内二次确认：客户端不支持 elicitation 时，签发一次性令牌，
+# AI 在聊天中向用户展示 SQL 征求同意后，携带令牌重新调用才执行。
+# ---------------------------------------------------------------------------
 
-async def execute_sql_entry(alias: str, entry: dict, query: str) -> list[TextContent]:
-    """三级判定 + 双账号执行 + 双通道确认（设计文档 4.3 节）。"""
+_TOKEN_TTL_SECONDS = 300  # 令牌有效期（5 分钟）
+
+_pending_tokens: dict[str, dict] = {}  # token -> {alias, sql, expires}
+_token_lock = anyio.Lock()
+
+
+def _now() -> float:
+    return time.monotonic()
+
+
+async def _issue_token(alias: str, query: str) -> str:
+    """签发一次性确认令牌（绑定别名与 SQL），并清理过期令牌。"""
+    import secrets
+    token = secrets.token_urlsafe(16)
+    async with _token_lock:
+        expired = [t for t, v in _pending_tokens.items() if v["expires"] < _now()]
+        for t in expired:
+            del _pending_tokens[t]
+        _pending_tokens[token] = {"alias": alias, "sql": query, "expires": _now() + _TOKEN_TTL_SECONDS}
+    return token
+
+
+async def _consume_token(token: str, alias: str, query: str) -> bool:
+    """校验并消费令牌：存在、未过期、别名与 SQL 均匹配才有效。"""
+    async with _token_lock:
+        info = _pending_tokens.get(token)
+        if info is None or info["expires"] < _now():
+            _pending_tokens.pop(token, None)
+            return False
+        if info["alias"] != alias or info["sql"] != query:
+            return False  # 不匹配不消费，等待正确调用或过期
+        del _pending_tokens[token]
+        return True
+
+
+async def execute_sql_entry(alias: str, entry: dict, query: str, confirm_token: str | None = None) -> list[TextContent]:
+    """三级判定 + 双账号执行 + 确认（elicitation 弹窗或聊天内令牌二次确认）。"""
     kind = classify(query)
     kw = first_keyword(query)
     if kw == "WITH":
@@ -159,6 +201,17 @@ async def execute_sql_entry(alias: str, entry: dict, query: str) -> list[TextCon
     if kind == "delete" and not entry.get("allow_delete"):
         audit.record(alias, sql_type, "-", query, status="rejected_delete_disabled")
         return [TextContent(type="text", text="该别名未开启删除权限，请在管理页面开启后重试。")]
+
+    # 携带令牌：校验通过则直接用操作账号执行（聊天内二次确认的第二步）
+    if confirm_token:
+        if await _consume_token(confirm_token, alias, query):
+            result = await run_query_entry(entry, query, "write")
+            audit.record(alias, sql_type, "token", query)
+            return result
+        audit.record(alias, sql_type, "token", query, status="invalid_token")
+        return [TextContent(type="text", text=(
+            "确认令牌无效、已过期或与本条 SQL 不匹配。"
+            "请重新发起（不带 confirm_token 调用）以获取新令牌，并再次向用户确认。"))]
 
     label = _KIND_LABELS.get(kind, "写")
     action = await elicit_confirm(alias, label, query)
@@ -178,8 +231,13 @@ async def execute_sql_entry(alias: str, entry: dict, query: str) -> list[TextCon
         return [TextContent(type="text", text=(
             "当前客户端不支持服务端确认（elicitation），"
             "且该别名策略为 elicitation_only，写操作已被拒绝。"))]
-    audit.record(alias, sql_type, "client", query)
-    return await run_query_entry(entry, query, "write")
+    # client_confirm：签发一次性令牌，要求聊天内二次确认
+    token = await _issue_token(alias, query)
+    audit.record(alias, sql_type, "token", query, status="pending_token")
+    return [TextContent(type="text", text=(
+        f"⚠️ 该{label}操作需要用户确认后才会执行。请向用户完整展示以下 SQL 并明确征求同意；"
+        f"用户同意后，使用相同 query 并携带 confirm_token={token} 重新调用 execute_sql。"
+        f"令牌 5 分钟内有效、一次性且仅对本条 SQL 有效。\n\n{query}"))]
 
 # Create the MCP Server instance.
 app = Server("mysql_mcp_server")
@@ -361,7 +419,10 @@ async def list_tools() -> list[Tool]:
                 "Execute a SQL statement against the MySQL server. "
                 "Use for SELECT, DML (INSERT/UPDATE/DELETE), SHOW, DESCRIBE, and ad-hoc queries. "
                 "Supports cross-database queries using database.table notation. "
-                "Single statements only — use fully qualified names instead of USE statements."
+                "Single statements only — use fully qualified names instead of USE statements. "
+                "Write/delete statements require user confirmation: depending on the client, either a "
+                "confirmation prompt appears, or the first call returns a confirm_token — show the SQL "
+                "to the user, and after explicit consent re-call with the same query plus confirm_token."
             ),
             inputSchema={
                 "type": "object",
@@ -369,6 +430,13 @@ async def list_tools() -> list[Tool]:
                     "query": {
                         "type": "string",
                         "description": "The SQL statement to execute. Single statements only."
+                    },
+                    "confirm_token": {
+                        "type": "string",
+                        "description": (
+                            "One-time confirmation token returned by a previous write attempt. "
+                            "Pass it with the SAME query after the user explicitly approved the SQL."
+                        )
                     }
                 },
                 "required": ["query"]
@@ -456,7 +524,8 @@ async def call_tool_impl(name: str, arguments: dict, alias: str | None = None) -
             if resolved is None:
                 return [TextContent(type="text", text=_NO_CONFIG_HINT)]
             a, entry = resolved
-            return await execute_sql_entry(a, entry, query)
+            confirm_token = arguments.get("confirm_token") or None
+            return await execute_sql_entry(a, entry, query, confirm_token=confirm_token)
 
         elif name == "get_schema_info":
             resolved = db_config.resolve(alias)
