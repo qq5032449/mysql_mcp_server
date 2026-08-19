@@ -19,6 +19,8 @@ DELETE_PREFIXES = {"DELETE", "TRUNCATE", "DROP"}
 _CTE_MAIN_KEYWORDS = {"SELECT", "INSERT", "UPDATE", "DELETE", "REPLACE", "DROP", "TRUNCATE"}
 _WORD_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_$]*")
 _QUOTES = ("'", '"', "`")
+# EXPLAIN ANALYZE（MySQL 8.0.18+）会真正执行目标语句，须按剥离前缀后的实际语句递归判定
+_EXPLAIN_ANALYZE_RE = re.compile(r"^\s*EXPLAIN\s+ANALYZE\b", re.IGNORECASE)
 
 
 def _skip_quoted(text: str, i: int) -> int:
@@ -129,7 +131,13 @@ def cte_main_keyword(sql: str) -> str:
 
 def classify(sql: str) -> str:
     """判定 SQL 语句类型：'read' | 'write' | 'delete'。默认 'write'（安全兜底）。"""
-    kw = first_keyword(sql)
+    text = strip_comments(sql)
+    m = _EXPLAIN_ANALYZE_RE.match(text)
+    if m:
+        # EXPLAIN ANALYZE 会真正执行目标语句，须按实际语句判定（普通 EXPLAIN
+        # 与 EXPLAIN FORMAT=... 不执行语句，仍走 read 分支）
+        return classify(text[m.end():])
+    kw = first_keyword(text)
     if kw == "WITH":
         main = cte_main_keyword(sql)
         if main in DELETE_PREFIXES:

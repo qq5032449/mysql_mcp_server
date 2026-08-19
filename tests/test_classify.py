@@ -131,3 +131,23 @@ class TestAdversarial:
 
     def test_hash_inside_string_does_not_hide_delete(self):
         assert classify("WITH c AS (SELECT 'a#') DELETE FROM t") == "delete"
+
+
+class TestExplainAnalyze:
+    def test_explain_analyze_delete(self):
+        assert classify("EXPLAIN ANALYZE DELETE FROM t") == "delete"
+
+    def test_explain_analyze_update(self):
+        assert classify("EXPLAIN ANALYZE UPDATE t SET x=1") == "write"
+
+    def test_explain_analyze_select_still_read(self):
+        assert classify("EXPLAIN ANALYZE SELECT * FROM t") == "read"
+
+    def test_plain_explain_still_read(self):
+        assert classify("EXPLAIN SELECT 1") == "read"
+
+    def test_explain_format_json_read(self):
+        assert classify("EXPLAIN FORMAT=JSON SELECT 1") == "read"
+
+    def test_explain_analyze_case_insensitive(self):
+        assert classify("explain analyze delete from t") == "delete"

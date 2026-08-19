@@ -26,3 +26,7 @@ Scripts/
 *.dist-info/
 
 pypi_publishing_notes.md
+
+# Runtime secrets & artifacts
+config/
+logs/
