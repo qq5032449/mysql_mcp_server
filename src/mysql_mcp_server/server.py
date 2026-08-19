@@ -153,7 +153,7 @@ _KIND_LABELS = {"write": "写", "delete": "删除类"}
 # ---------------------------------------------------------------------------
 
 _TOKEN_TTL_SECONDS = 300  # 令牌有效期（5 分钟）
-_TOKEN_MIN_DELAY_SECONDS = 3.0  # 冷静期：签发后 3 秒内不可使用（防止跳过用户确认）
+_TOKEN_MIN_DELAY_SECONDS = 6.0  # 冷静期：签发后 6 秒内不可使用（防止跳过用户确认）
 
 _pending_tokens: dict[str, dict] = {}  # token -> {alias, sql, expires, not_before}
 _token_lock = anyio.Lock()
@@ -226,7 +226,7 @@ async def execute_sql_entry(alias: str, entry: dict, query: str, confirm_token: 
         if verdict == "too_early":
             audit.record(alias, sql_type, "token", query, status="token_too_early")
             return [TextContent(type="text", text=(
-                "确认令牌在签发后 3 秒内不可使用——检测到未经过用户确认即尝试执行，该令牌已作废。"
+                "确认令牌在签发后 6 秒内不可使用——检测到未经过用户确认即尝试执行，该令牌已作废。"
                 "必须使用 AskUserQuestion 工具向用户完整展示 SQL 并获得明确授权；"
                 "用户同意后，重新调用（不带 confirm_token）获取新令牌，"
                 "待用户确认完成后再携带新令牌执行。"))]

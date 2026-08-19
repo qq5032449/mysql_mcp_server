@@ -128,7 +128,7 @@ async def test_token_confirm_executes():
 
 @pytest.mark.asyncio
 async def test_token_used_too_early_rejected_and_invalidated():
-    """签发后立即使用（3 秒冷静期内）→ 拒绝执行且令牌作废，提示必须走用户确认。"""
+    """签发后立即使用（6 秒冷静期内）→ 拒绝执行且令牌作废，提示必须走用户确认。"""
     from mysql_mcp_server import server
     server._pending_tokens.clear()
     ok = TextContent(type="text", text="done")
@@ -149,9 +149,9 @@ async def test_token_used_too_early_rejected_and_invalidated():
 
 @pytest.mark.asyncio
 async def test_token_cooling_period_value():
-    """冷静期为 3 秒。"""
+    """冷静期为 6 秒。"""
     from mysql_mcp_server import server
-    assert server._TOKEN_MIN_DELAY_SECONDS == 3.0
+    assert server._TOKEN_MIN_DELAY_SECONDS == 6.0
 
 
 @pytest.mark.asyncio
