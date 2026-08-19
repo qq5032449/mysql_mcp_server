@@ -321,3 +321,29 @@ class TestSseAppStructure:
         assert "/sse" in paths
         assert "/messages/{alias}" in paths or "/messages/{alias}/" in paths
         assert "/admin" in paths  # Mount
+
+
+class TestBuildAllowedHosts:
+    def test_loopback_defaults(self):
+        from mysql_mcp_server.server import _build_allowed_hosts
+        hosts = _build_allowed_hosts("127.0.0.1", 8000)
+        assert "localhost:8000" in hosts and "127.0.0.1:8000" in hosts
+
+    def test_wildcard_includes_local_ipv4(self):
+        from mysql_mcp_server.server import _build_allowed_hosts
+        import ipaddress
+        hosts = _build_allowed_hosts("0.0.0.0", 8000)
+        # 全部条目必须是 "localhost:port" 或合法 IP:port（IPv6 带方括号）
+        ips = []
+        for h in hosts:
+            ip_str = h.rsplit(":", 1)[0].strip("[]")
+            if ip_str != "localhost":
+                ipaddress.ip_address(ip_str)
+                ips.append(ip_str)
+        # 至少包含回环
+        assert any(ipaddress.ip_address(i).is_loopback for i in ips)
+
+    def test_specific_host_included(self):
+        from mysql_mcp_server.server import _build_allowed_hosts
+        hosts = _build_allowed_hosts("192.168.84.22", 9000)
+        assert "192.168.84.22:9000" in hosts

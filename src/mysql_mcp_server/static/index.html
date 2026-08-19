@@ -169,9 +169,26 @@ let dbs = { default_alias: null, databases: {} };
 let editingAlias = null;
 
 async function api(path, opts = {}) {
-  const r = await fetch(path, { headers: { "Content-Type": "application/json" }, ...opts });
+  const headers = { "Content-Type": "application/json", ...(opts.headers || {}) };
+  const token = localStorage.getItem("adminToken");
+  if (token) headers["X-Admin-Token"] = token;
+  const r = await fetch(path, { ...opts, headers });
   let body = null;
   try { body = await r.json(); } catch (_) {}
+  if (r.status === 401) {
+    // 局域网访问需要令牌：引导输入并重试一次
+    const t = prompt("访问管理 API 需要令牌（ADMIN_TOKEN），请输入：");
+    if (t) {
+      localStorage.setItem("adminToken", t);
+      headers["X-Admin-Token"] = t;
+      const r2 = await fetch(path, { ...opts, headers });
+      let b2 = null;
+      try { b2 = await r2.json(); } catch (_) {}
+      if (!r2.ok) throw new Error((b2 && b2.error) || r2.statusText || "令牌无效");
+      return b2;
+    }
+    throw new Error("未提供访问令牌");
+  }
   if (!r.ok) throw new Error((body && body.error) || r.statusText || "请求失败");
   return body;
 }
@@ -223,7 +240,7 @@ function renderSse() {
     return;
   }
   box.innerHTML = aliases.map(a => {
-    const url = "http://127.0.0.1:8000/sse?alias=" + encodeURIComponent(a);
+    const url = location.origin.replace(/\/$/, "") + "/sse?alias=" + encodeURIComponent(a);
     return `<div class="sse-row">${esc(a)} →
       <span class="code" data-url="${esc(url)}" onclick="copySse(this)">${esc(url)}</span></div>`;
   }).join("");

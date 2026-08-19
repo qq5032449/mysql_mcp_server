@@ -769,6 +769,32 @@ def build_starlette_app(security_settings=None):
     ])
 
 
+def _build_allowed_hosts(host: str, port: int) -> list[str]:
+    """构建 SSE DNS rebinding 防护的 Host 白名单。
+
+    - 环境变量 MCP_SSE_ALLOWED_HOSTS 显式指定时优先
+    - 默认：localhost/127.0.0.1；绑定具体地址时加该地址
+    - 绑定 0.0.0.0/:: 时自动探测本机全部 IPv4 加入（局域网直连可用）
+    """
+    allowed_hosts_env = os.getenv("MCP_SSE_ALLOWED_HOSTS", "")
+    if allowed_hosts_env:
+        return [h.strip() for h in allowed_hosts_env.split(",") if h.strip()]
+    hosts = [f"localhost:{port}", f"127.0.0.1:{port}", f"[::1]:{port}"]
+    if host in ("0.0.0.0", "::"):
+        try:
+            infos = socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET)
+            for info in infos:
+                ip = info[4][0]
+                entry = f"{ip}:{port}"
+                if entry not in hosts:
+                    hosts.append(entry)
+        except OSError:
+            pass
+    elif host not in ("127.0.0.1", "localhost"):
+        hosts.append(f"{host}:{port}")
+    return hosts
+
+
 async def _run_sse_server():
     """
     Runs the server using Server-Sent Events (SSE) over HTTP.
@@ -792,13 +818,7 @@ async def _run_sse_server():
     try:
         from mcp.server.transport_security import TransportSecuritySettings
 
-        allowed_hosts_env = os.getenv("MCP_SSE_ALLOWED_HOSTS", "")
-        if allowed_hosts_env:
-            allowed_hosts = [h.strip() for h in allowed_hosts_env.split(",") if h.strip()]
-        else:
-            allowed_hosts = [f"localhost:{port}", f"127.0.0.1:{port}"]
-            if host not in ("0.0.0.0", "127.0.0.1", "localhost", "::"):
-                allowed_hosts.append(f"{host}:{port}")
+        allowed_hosts = _build_allowed_hosts(host, port)
 
         logger.info(
             "SSE DNS rebinding protection enabled. Allowed hosts: %s. "

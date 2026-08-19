@@ -1,9 +1,12 @@
 """管理页面 REST API：配置 CRUD、连接测试、默认别名设置、审计、健康检查。
 
-仅允许回环地址访问；配置变更通过回调通知（server 模块注册以失效别名实例缓存）。
+访问控制：回环客户端直接放行；非回环需 ADMIN_TOKEN 令牌（未设置则仅回环）。
+配置变更通过回调通知（server 模块注册以失效别名实例缓存）。
 """
 
+import ipaddress
 import logging
+import os
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -27,6 +30,9 @@ _LOOPBACK = {"127.0.0.1", "::1", "localhost"}
 # Host 头白名单（防 DNS rebinding）；testserver/testserver.local 仅为 TestClient 默认 base_url 兼容
 _ALLOWED_HOSTS = {"127.0.0.1", "::1", "localhost", "testserver", "testserver.local"}
 
+# 局域网访问令牌：设置后非回环客户端必须携带（X-Admin-Token 头或 admin_token 参数）
+_ADMIN_TOKEN = os.getenv("ADMIN_TOKEN")
+
 _on_change_callbacks = []
 
 
@@ -44,23 +50,40 @@ def _notify_changed(alias: str) -> None:
             logger.warning("on-change callback failed", exc_info=True)
 
 
-def _guard(request: Request) -> JSONResponse | None:
-    ip = request.client.host if request.client else ""
+def _is_loopback(ip: str) -> bool:
     if ip.startswith("::ffff:"):  # IPv4-mapped IPv6
         ip = ip[7:]
-    if ip not in _LOOPBACK:
-        return JSONResponse({"error": "forbidden: admin API is loopback-only"}, status_code=403)
+    return ip in _LOOPBACK
+
+
+def _guard(request: Request) -> JSONResponse | None:
+    """回环客户端直接放行；非回环需 ADMIN_TOKEN 令牌（未配置令牌则保持仅回环）。"""
+    ip = request.client.host if request.client else ""
+    if _is_loopback(ip):
+        return None
+    if not _ADMIN_TOKEN:
+        return JSONResponse({"error": "forbidden: admin API is loopback-only (set ADMIN_TOKEN for LAN access)"}, status_code=403)
+    supplied = request.headers.get("x-admin-token") or request.query_params.get("admin_token")
+    if supplied != _ADMIN_TOKEN:
+        return JSONResponse({"error": "unauthorized: invalid or missing admin token"}, status_code=401)
     return None
 
 
 def _host_allowed(host_header: str | None) -> bool:
-    """Host 头 hostname 必须是回环/白名单值（防 DNS rebinding）；缺失或解析为空时放行。"""
+    """Host 头必须是 IP 地址或 localhost（防 DNS rebinding 域名攻击）；缺失或解析为空时放行。"""
     if not host_header:
         return True
     hostname = urlsplit("//" + host_header).hostname
     if not hostname:
         return True
-    return hostname.lower() in _ALLOWED_HOSTS
+    h = hostname.lower()
+    if h in _ALLOWED_HOSTS:
+        return True
+    try:
+        ipaddress.ip_address(h)
+        return True  # 任意 IP 直连（含局域网 IP）
+    except ValueError:
+        return False  # 域名形式一律拒绝（DNS rebinding 防护）
 
 
 async def _body(request: Request) -> dict:
@@ -183,13 +206,18 @@ async def get_health(request: Request):
 
 
 class _GuardMiddleware(BaseHTTPMiddleware):
-    """统一在 middleware 做回环 + Host 校验，覆盖 API 路由与 /admin 静态挂载。"""
+    """统一在 middleware 做访问控制，覆盖 API 路由与 /admin 静态挂载。
+
+    - Host 校验对全部请求生效（防 DNS rebinding：只允许 IP/localhost）
+    - 令牌校验仅对 /api/* 生效（静态页放行，由前端在 401 后引导输入令牌）
+    """
 
     async def dispatch(self, request: Request, call_next):
-        if (g := _guard(request)):
-            return g
         if not _host_allowed(request.headers.get("host")):
             return JSONResponse({"error": "forbidden: Host header not allowed"}, status_code=403)
+        if request.url.path.startswith("/api"):
+            if (g := _guard(request)):
+                return g
         return await call_next(request)
 
 

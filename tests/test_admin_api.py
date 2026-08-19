@@ -45,6 +45,61 @@ class TestLoopbackGuard:
         assert r.status_code == 403
 
 
+class TestLanTokenAccess:
+    """ADMIN_TOKEN 设置后，非回环客户端持令牌可访问，否则 401。"""
+
+    def test_lan_without_token_401(self, app, monkeypatch, no_env):
+        monkeypatch.setattr(admin_api, "_ADMIN_TOKEN", "secret123")
+        c = TestClient(app, client=("192.168.84.5", 50000))
+        assert c.get("/api/databases").status_code == 401
+
+    def test_lan_with_valid_token_header(self, app, monkeypatch, no_env):
+        monkeypatch.setattr(admin_api, "_ADMIN_TOKEN", "secret123")
+        c = TestClient(app, client=("192.168.84.5", 50000))
+        r = c.get("/api/databases", headers={"X-Admin-Token": "secret123"})
+        assert r.status_code == 200
+
+    def test_lan_with_valid_token_query(self, app, monkeypatch, no_env):
+        monkeypatch.setattr(admin_api, "_ADMIN_TOKEN", "secret123")
+        c = TestClient(app, client=("192.168.84.5", 50000))
+        r = c.get("/api/databases?admin_token=secret123")
+        assert r.status_code == 200
+
+    def test_lan_with_wrong_token_401(self, app, monkeypatch, no_env):
+        monkeypatch.setattr(admin_api, "_ADMIN_TOKEN", "secret123")
+        c = TestClient(app, client=("192.168.84.5", 50000))
+        assert c.get("/api/databases", headers={"X-Admin-Token": "bad"}).status_code == 401
+
+    def test_loopback_still_token_free(self, app, monkeypatch, no_env):
+        monkeypatch.setattr(admin_api, "_ADMIN_TOKEN", "secret123")
+        c = TestClient(app, client=("127.0.0.1", 50000))
+        assert c.get("/api/databases").status_code == 200
+
+    def test_lan_static_page_served_without_token(self, app, monkeypatch, no_env):
+        """静态页本身放行（无敏感数据），由前端在 401 后引导输入令牌。"""
+        monkeypatch.setattr(admin_api, "_ADMIN_TOKEN", "secret123")
+        c = TestClient(app, client=("192.168.84.5", 50000))
+        r = c.get("/")
+        assert r.status_code == 200
+
+
+class TestHostAllowed:
+    def test_ip_host_allowed(self):
+        assert admin_api._host_allowed("192.168.84.22:8000") is True
+        assert admin_api._host_allowed("[::1]:8000") is True
+
+    def test_domain_host_rejected(self):
+        assert admin_api._host_allowed("evil.example.com:8000") is False
+        assert admin_api._host_allowed("evil.example.com") is False
+
+    def test_localhost_and_testserver_allowed(self):
+        assert admin_api._host_allowed("localhost:8000") is True
+        assert admin_api._host_allowed("testserver") is True
+
+    def test_missing_host_allowed(self):
+        assert admin_api._host_allowed(None) is True
+
+
 class TestOnChange:
     def test_callbacks_called_on_create_update_delete(self, client, no_env):
         calls = []
@@ -80,11 +135,12 @@ class TestRegisterDedup:
 
 
 class TestMiddleware:
-    def test_static_files_guarded(self, app, no_env):
-        # static 目录暂不存在，但守卫应在 404 之前拦截
+    def test_static_page_open_but_api_guarded(self, app, no_env):
+        """局域网：静态页放行（无敏感数据），API 无令牌被拦。"""
         c = TestClient(app, client=("10.0.0.5", 50000))
-        r = c.get("/admin/anything")
-        assert r.status_code == 403
+        assert c.get("/api/health").status_code == 403  # 无 ADMIN_TOKEN：仅回环
+        # 静态页不在 /api 下，不做令牌校验（此路径不存在文件 → 404，非 403）
+        assert c.get("/nonexistent-static").status_code == 404
 
     def test_bad_host_header_rejected(self, client, no_env):
         r = client.get("/api/health", headers={"Host": "evil.example.com"})
