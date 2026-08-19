@@ -105,3 +105,29 @@ class TestClassify:
     @pytest.mark.parametrize("sql", ["", "   ", "FOO BAR", "123", "WITH c AS (SELECT 1) MERGE INTO t"])
     def test_unknown_defaults_to_write(self, sql):
         assert classify(sql) == "write"
+
+
+class TestAdversarial:
+    @pytest.mark.parametrize("sql", [
+        "WITH c AS (SELECT 'x) SELECT 1') DELETE FROM t",
+        "WITH c AS (SELECT 'a) INSERT') DROP TABLE t",
+        "WITH `select` AS (SELECT 1) DELETE FROM t",
+        "WITH `update` AS (SELECT 1) DELETE FROM t",
+    ])
+    def test_string_and_backtick_tricks_still_delete(self, sql):
+        assert classify(sql) == "delete"
+
+    def test_escaped_quotes_inside_string(self):
+        assert classify(r"WITH c AS (SELECT 'it\'s ) fine') DELETE FROM t") == "delete"
+
+    def test_double_backtick_in_identifier(self):
+        assert classify("WITH `a``b` AS (SELECT 1) DELETE FROM t") == "delete"
+
+    def test_normal_cte_still_works(self):
+        assert classify("WITH c AS (SELECT ') just a paren') SELECT * FROM c") == "read"
+
+    def test_comment_markers_inside_string_not_stripped(self):
+        assert strip_comments("SELECT '# c -- /* x'") == "SELECT '# c -- /* x'"
+
+    def test_hash_inside_string_does_not_hide_delete(self):
+        assert classify("WITH c AS (SELECT 'a#') DELETE FROM t") == "delete"
