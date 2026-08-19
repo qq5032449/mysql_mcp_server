@@ -104,6 +104,49 @@ When `MYSQL_DATABASE` is not set, the server operates in multi-database mode:
 - Use fully qualified table names like `mydb.mytable` in SQL queries
 - **Note:** Only single SQL statements are supported. Multi-statement queries (e.g., `USE db; SELECT ...`) are not supported.
 
+## Admin Page & Multi-Database Aliases (SSE mode)
+
+Run the server in SSE mode and open the built-in admin page to manage multiple
+database connections, each with **separate read/write accounts**:
+
+```bash
+# Windows PowerShell
+$env:MCP_TRANSPORT="sse"; $env:MCP_SSE_PORT="8000"; python -m mysql_mcp_server
+# Linux/macOS
+MCP_TRANSPORT=sse MCP_SSE_PORT=8000 python -m mysql_mcp_server
+```
+
+Admin page: `http://127.0.0.1:8000/admin/` (loopback only — the admin API and
+page reject non-loopback clients and unknown Host headers; do not place it
+behind a reverse proxy).
+
+For each alias you configure:
+
+| Field | Purpose |
+|---|---|
+| Connection (host/port/database) | Where to connect. Leave database empty for multi-database mode. |
+| Read user (查询用户) | Used for SELECT / SHOW / DESCRIBE / EXPLAIN |
+| Write user (操作用户) | Used for DML/DDL **after confirmation** |
+| write_policy | `client_confirm` (default): if the client lacks elicitation support, writes proceed trusting the client's own tool-confirmation UI. `elicitation_only`: writes are rejected when the client cannot show the server-side confirmation prompt. |
+| allow_delete | Master switch for DELETE / TRUNCATE / DROP (default off) |
+
+Clients connect per alias: `http://127.0.0.1:8000/sse?alias=db1`
+(omit `alias` to use the default alias). Plain `MYSQL_*` env vars still work
+as a backward-compatible single-database fallback when no `config/databases.json`
+entries exist (read and write share the same account in that mode).
+
+> Note the difference from [Multi-Database Mode](#multi-database-mode) above:
+> that mode exposes multiple *schemas* over a single connection, while aliases
+> manage multiple *connections*, each with its own accounts and write policy.
+
+**How writes are confirmed:** the server classifies each statement
+(read / write / delete). Reads run directly on the read account. Writes and
+deletes trigger an MCP **elicitation** prompt showing the full SQL — accept to
+run it with the write account, decline to abort. If the client does not support
+elicitation, the per-alias `write_policy` decides the fallback (see table).
+All write attempts are recorded in the admin page's audit list
+(`logs/audit.log` on disk).
+
 ## Available Tools
 
 ### `execute_sql`
