@@ -338,6 +338,9 @@ async def list_resource_templates() -> list[ResourceTemplate]:
     return []
 
 
+
+
+
 async def read_resource_impl(alias: str | None = None, uri: AnyUrl = None) -> str:
     """
     Reads the content of a specific table or lists tables within a database based on the provided URI.
@@ -435,11 +438,31 @@ def create_alias_server(alias: str) -> Server:
     return s
 
 
+def _effective_alias(connection_alias: str | None, arguments: dict) -> str | None:
+    p = arguments.get("alias")
+    if isinstance(p, str) and p.strip():
+        return p.strip()
+    return connection_alias
+
+
+def _unknown_alias_hint(alias: str) -> str:
+    cfg = db_config.load_config()
+    available = sorted(cfg.get("databases", {}).keys())
+    avail_str = ", ".join(available) if available else "无"
+    return f"别名 '{alias}' 不存在。可用别名: {avail_str}。请在管理页面 /admin 配置或使用 list_aliases 查看。"
+
+
 @app.list_tools()
 async def list_tools() -> list[Tool]:
     """
     Defines the tools available to AI agents via this MCP server.
     """
+    alias_prop = {
+        "alias": {
+            "type": "string",
+            "description": "数据库别名（对应管理页面 /admin 中配置的别名）。在一个 SSE 连接内通过此参数切换不同库；省略则使用连接 URL 中 ?alias 指定的别名或默认别名。"
+        }
+    }
     return [
         Tool(
             name="execute_sql",
@@ -450,7 +473,8 @@ async def list_tools() -> list[Tool]:
                 "Single statements only — use fully qualified names instead of USE statements. "
                 "Write/delete statements require user confirmation: depending on the client, either a "
                 "confirmation prompt appears, or the first call returns a confirm_token — show the SQL "
-                "to the user, and after explicit consent re-call with the same query plus confirm_token."
+                "to the user, and after explicit consent re-call with the same query plus confirm_token. "
+                "Use the optional alias parameter to target a different configured database within a single connection."
             ),
             inputSchema={
                 "type": "object",
@@ -465,7 +489,8 @@ async def list_tools() -> list[Tool]:
                             "One-time confirmation token returned by a previous write attempt. "
                             "Pass it with the SAME query after the user explicitly approved the SQL."
                         )
-                    }
+                    },
+                    **alias_prop
                 },
                 "required": ["query"]
             },
@@ -482,7 +507,8 @@ async def list_tools() -> list[Tool]:
                 "column names, data types, nullability, default values, and comments. "
                 "Call this before querying an unfamiliar table. "
                 "Omit table_name to see all tables at once. "
-                "Accepts bare table names (uses MYSQL_DATABASE) or database.table for cross-database lookups."
+                "Accepts bare table names (uses MYSQL_DATABASE) or database.table for cross-database lookups. "
+                "Use alias to target a different configured database."
             ),
             inputSchema={
                 "type": "object",
@@ -490,7 +516,8 @@ async def list_tools() -> list[Tool]:
                     "table_name": {
                         "type": "string",
                         "description": "Optional: bare table name, or database.table for a cross-database lookup."
-                    }
+                    },
+                    **alias_prop
                 }
             },
             annotations=ToolAnnotations(
@@ -504,7 +531,8 @@ async def list_tools() -> list[Tool]:
             description=(
                 "Fetch a small sample of rows from a table to understand its data format and content. "
                 "Use alongside get_schema_info before writing complex queries. "
-                "Accepts bare table names (uses MYSQL_DATABASE) or database.table for cross-database lookups."
+                "Accepts bare table names (uses MYSQL_DATABASE) or database.table for cross-database lookups. "
+                "Use alias to target a different configured database."
             ),
             inputSchema={
                 "type": "object",
@@ -516,7 +544,8 @@ async def list_tools() -> list[Tool]:
                     "limit": {
                         "type": "integer",
                         "description": "Number of rows to return (default 5, max 20)."
-                    }
+                    },
+                    **alias_prop
                 },
                 "required": ["table_name"]
             },
@@ -528,6 +557,7 @@ async def list_tools() -> list[Tool]:
         )
     ]
 
+
 _NO_CONFIG_HINT = "未配置任何数据库连接，请访问管理页面 /admin 进行配置。"
 
 
@@ -535,6 +565,7 @@ async def call_tool_impl(name: str, arguments: dict, alias: str | None = None) -
     """
     工具调用实现：按别名路由到 execute_sql_entry / run_query_entry（read 角色）。
     alias=None 时用默认别名（databases.json 缺省时回退环境变量）。
+    同时支持在 arguments 中通过 alias 参数覆盖连接级别别名（单连接多库）。
     """
     try:
         logger.info(f"Calling tool: {name} with arguments: {arguments}")
@@ -548,7 +579,10 @@ async def call_tool_impl(name: str, arguments: dict, alias: str | None = None) -
                     "Only single statements are supported. "
                     "Instead of USE statements, use fully qualified names: database.table"
                 ))]
-            resolved = db_config.resolve(alias)
+            eff = _effective_alias(alias, arguments)
+            resolved = db_config.resolve(eff)
+            if eff is not None and eff != alias and resolved is None:
+                return [TextContent(type="text", text=_unknown_alias_hint(eff))]
             if resolved is None:
                 return [TextContent(type="text", text=_NO_CONFIG_HINT)]
             a, entry = resolved
@@ -556,7 +590,10 @@ async def call_tool_impl(name: str, arguments: dict, alias: str | None = None) -
             return await execute_sql_entry(a, entry, query, confirm_token=confirm_token)
 
         elif name == "get_schema_info":
-            resolved = db_config.resolve(alias)
+            eff = _effective_alias(alias, arguments)
+            resolved = db_config.resolve(eff)
+            if eff is not None and eff != alias and resolved is None:
+                return [TextContent(type="text", text=_unknown_alias_hint(eff))]
             if resolved is None:
                 return [TextContent(type="text", text=_NO_CONFIG_HINT)]
             _, entry = resolved
@@ -570,7 +607,10 @@ async def call_tool_impl(name: str, arguments: dict, alias: str | None = None) -
             return await run_query_entry(entry, query, "read")
 
         elif name == "get_table_sample":
-            resolved = db_config.resolve(alias)
+            eff = _effective_alias(alias, arguments)
+            resolved = db_config.resolve(eff)
+            if eff is not None and eff != alias and resolved is None:
+                return [TextContent(type="text", text=_unknown_alias_hint(eff))]
             if resolved is None:
                 return [TextContent(type="text", text=_NO_CONFIG_HINT)]
             _, entry = resolved
