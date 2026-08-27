@@ -103,6 +103,11 @@
           <div><label>端口</label><input id="f_port" placeholder="3306"></div>
           <div><label>数据库名</label><input id="f_database" placeholder="mydb"></div>
           <div><label>字符集</label><input id="f_charset" placeholder="utf8mb4"></div>
+          <div>
+            <label>项目名称</label>
+            <input id="f_projects" placeholder="my-web, order-service">
+            <span class="warn" style="color:var(--muted)">多个用逗号分隔；MCP 调用时传项目文件夹名即自动匹配此库</span>
+          </div>
         </div>
       </fieldset>
       <fieldset>
@@ -244,7 +249,8 @@ function renderDbs() {
       </div>
       <div class="db-meta">${esc(d.host)}:${esc(d.port)}/${esc(d.database || "-")}
         · 读: ${esc(d.read_user.user)} · 写: ${esc(d.write_user.user)}
-        · 写策略: ${esc(POLICY_LABEL[d.write_policy] || d.write_policy)}</div>
+        · 写策略: ${esc(POLICY_LABEL[d.write_policy] || d.write_policy)}
+        ${d.projects && d.projects.length ? '<br>项目: ' + esc(d.projects.join(", ")) : ""}</div>
     </div>`;
   }).join("");
 }
@@ -302,6 +308,7 @@ function openModal(alias) {
     $("f_port").value = d.port ?? "";
     $("f_database").value = d.database || "";
     $("f_charset").value = d.charset || "";
+    $("f_projects").value = (d.projects || []).join(", ");
     $("f_read_user").value = (d.read_user || {}).user || "";
     $("f_write_user").value = (d.write_user || {}).user || "";
     $("f_write_policy").value = d.write_policy || "client_confirm";
@@ -336,6 +343,7 @@ function collectForm() {
     port: num("f_port", 3306),
     database: val("f_database") || null,
     charset: val("f_charset") || "utf8mb4",
+    projects: val("f_projects") ? val("f_projects").split(/[,，\s]+/).filter(Boolean) : [],
     read_user: { user: val("f_read_user"), password: $("f_read_pass").value },
     write_user: { user: val("f_write_user"), password: $("f_write_pass").value },
     write_policy: $("f_write_policy").value,

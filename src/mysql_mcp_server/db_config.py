@@ -129,6 +129,22 @@ def normalize_entry(entry: dict) -> dict:
         except (TypeError, ValueError):
             raise ValueError("ssh 端口必须是整数") from None
 
+    def _projects(value) -> list[str]:
+        """项目名称列表：接受字符串（逗号/空白分隔）或字符串列表。"""
+        if value is None:
+            return []
+        if isinstance(value, str):
+            parts = [p.strip() for p in re.split(r"[,，\s]+", value)]
+            return [p for p in parts if p]
+        if isinstance(value, list):
+            out: list[str] = []
+            for p in value:
+                s = str(p).strip()
+                if s:
+                    out.append(s)
+            return out
+        raise ValueError("projects 必须是字符串或字符串列表")
+
     ssh = entry.get("ssh") or {}
     return {
         "host": entry.get("host", "localhost"),
@@ -142,6 +158,7 @@ def normalize_entry(entry: dict) -> dict:
         "write_policy": entry.get("write_policy", "client_confirm"),
         "allow_delete": bool(entry.get("allow_delete", False)),
         "skip_confirm": bool(entry.get("skip_confirm", False)),
+        "projects": _projects(entry.get("projects")),
         "ssh": {
             "enable": bool(ssh.get("enable", False)),
             "host": ssh.get("host"),
@@ -158,16 +175,32 @@ def normalize_entry(entry: dict) -> dict:
 def resolve(alias: str | None) -> tuple[str, dict] | None:
     """解析别名到 (alias, entry)。alias=None 时用 default_alias；解析失败返回 None。
 
+    alias 优先按别名精确匹配；未命中时回退为按项目名称匹配
+    （MCP 调用可传项目文件夹名，自动路由到绑定了该项目的数据库）。
     返回的 entry 是深拷贝，调用方原地修改不会污染缓存。
     """
     cfg = load_config()
     dbs = cfg.get("databases", {})
     if alias:
-        return (alias, json.loads(json.dumps(dbs[alias]))) if alias in dbs else None
+        if alias in dbs:
+            return (alias, json.loads(json.dumps(dbs[alias])))
+        hit = _resolve_by_project(dbs, alias)
+        return (hit[0], json.loads(json.dumps(hit[1]))) if hit else None
     default = cfg.get("default_alias")
     if default and default in dbs:
         return default, json.loads(json.dumps(dbs[default]))
     return None
+
+
+def _resolve_by_project(dbs: dict, project: str) -> tuple[str, dict] | None:
+    """按项目名称查找数据库条目；多个命中时取别名排序最小者（确定性）。"""
+    matches = sorted(
+        (a for a, e in dbs.items() if project in (e.get("projects") or [])),
+    )
+    if not matches:
+        return None
+    a = matches[0]
+    return a, dbs[a]
 
 
 def masked_config(cfg: dict) -> dict:

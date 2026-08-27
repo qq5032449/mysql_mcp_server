@@ -447,9 +447,17 @@ def _effective_alias(connection_alias: str | None, arguments: dict) -> str | Non
 
 def _unknown_alias_hint(alias: str) -> str:
     cfg = db_config.load_config()
-    available = sorted(cfg.get("databases", {}).keys())
-    avail_str = ", ".join(available) if available else "无"
-    return f"别名 '{alias}' 不存在。可用别名: {avail_str}。请在管理页面 /admin 配置或使用 list_aliases 查看。"
+    dbs = cfg.get("databases", {})
+    if not dbs:
+        return (f"别名或项目 '{alias}' 不存在。当前未配置任何数据库，"
+                "请在管理页面 /admin 配置。")
+    lines = [f"别名或项目 '{alias}' 不存在。可用配置："]
+    for a in sorted(dbs):
+        projects = dbs[a].get("projects") or []
+        proj_str = f"（项目: {', '.join(projects)}）" if projects else ""
+        lines.append(f"- {a}{proj_str}")
+    lines.append("参数 alias 可传数据库别名，或管理页面配置的项目名称（项目文件夹名）。")
+    return "\n".join(lines)
 
 
 @app.list_tools()
@@ -460,7 +468,11 @@ async def list_tools() -> list[Tool]:
     alias_prop = {
         "alias": {
             "type": "string",
-            "description": "数据库别名（对应管理页面 /admin 中配置的别名）。在一个 SSE 连接内通过此参数切换不同库；省略则使用连接 URL 中 ?alias 指定的别名或默认别名。"
+            "description": (
+                "数据库别名，或管理页面 /admin 中为该库配置的项目名称（项目文件夹名）。"
+                "在单个 SSE 连接内通过此参数切换不同库；省略时用连接 URL ?alias 指定的别名或默认别名。"
+                "建议优先传当前项目文件夹名自动匹配对应数据库。"
+            )
         }
     }
     return [
