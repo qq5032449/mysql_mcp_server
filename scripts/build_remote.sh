@@ -38,15 +38,25 @@ rm -rf build dist
 # 与错误消息（locales/eng）均为运行时动态加载，必须整体收集
 # dmPython 是单 .so 模块（非包），--collect-all 不生效；用 --collect-binaries
 # 收集其 .so 及 dmpython.libs/ 下的 DPI 库（libdmdpi），dmssl/ 下的加密库
-SITE=$($PY -c "import site; print(site.getsitepackages()[0])")
+# （venv 下 getsitepackages()[0] 可能是 lib64，而包装在 lib，需遍历查找）
+DM_LIB_DIR=""
+for _d in $($PY -c "import site; print(' '.join(site.getsitepackages()))"); do
+  if [ -d "$_d/dmpython.libs" ]; then DM_LIB_DIR="$_d"; break; fi
+done
+DM_BIN_ARGS=""
+if [ -n "$DM_LIB_DIR" ]; then
+  DM_BIN_ARGS="--add-binary $DM_LIB_DIR/dmpython.libs/*.so:dmpython.libs --add-data $DM_LIB_DIR/dmssl:dmssl"
+  echo "dmPython libs found in: $DM_LIB_DIR"
+else
+  echo "WARN: dmpython.libs not found, DM encryption module may be missing"
+fi
 $PY -m PyInstaller --onefile --name mysql_mcp_server \
   --hidden-import mcp.server.sse \
   --hidden-import mcp.server.transport_security \
   --hidden-import mcp.server.lowlevel.server \
   --collect-all mysql \
   --collect-binaries dmPython \
-  --add-binary "$SITE/dmpython.libs/*.so:dmpython.libs" \
-  --add-data "$SITE/dmssl:dmssl" \
+  $DM_BIN_ARGS \
   --collect-data mysql_mcp_server \
   --paths src \
   --distpath dist \
