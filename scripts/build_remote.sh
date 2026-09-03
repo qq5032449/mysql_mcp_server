@@ -78,22 +78,23 @@ fi
 command -v patchelf >/dev/null 2>&1 || {
   yum install -y patchelf >/dev/null 2>&1 || apt-get install -y patchelf >/dev/null 2>&1 || true
 }
-$PY -m staticx $STATICX_FLAGS dist/mysql_mcp_server dist/mysql_mcp_server.staticx \
+# staticx 0.14.2 对长输出文件名有截断 bug（mysql_mcp_server.staticx → mysql_mcp_serve），
+# 用短名输出再改名绕过
+$PY -m staticx $STATICX_FLAGS dist/mysql_mcp_server dist/out.staticx \
   || { echo "STATICX_FAILED（保留非静态版本）"; }
 unset TMPDIR
-# staticx 0.14.2 输出文件名偶发截断一字符，兼容处理
-if [ ! -f dist/mysql_mcp_server.staticx ]; then
-  _trunc=$(ls dist/mysql_mcp_server.static* 2>/dev/null | grep -v "^dist/mysql_mcp_server.staticx$" | head -1)
-  if [ -n "$_trunc" ]; then
-    echo "rename truncated staticx output: $_trunc -> dist/mysql_mcp_server.staticx"
-    mv "$_trunc" dist/mysql_mcp_server.staticx
-  fi
-fi
-if [ -f dist/mysql_mcp_server.staticx ]; then
-  mv dist/mysql_mcp_server.staticx dist/mysql_mcp_server
+if [ -f dist/out.staticx ]; then
+  mv dist/out.staticx dist/mysql_mcp_server
   chmod +x dist/mysql_mcp_server
   file dist/mysql_mcp_server 2>/dev/null || true
   ldd dist/mysql_mcp_server 2>&1 | head -1 || true
+else
+  # 兼容旧截断名残留
+  if [ -f dist/mysql_mcp_serve ]; then
+    echo "rename truncated staticx output dist/mysql_mcp_serve -> dist/mysql_mcp_server"
+    mv dist/mysql_mcp_serve dist/mysql_mcp_server
+    chmod +x dist/mysql_mcp_server
+  fi
 fi
 
 echo "=== done ==="
