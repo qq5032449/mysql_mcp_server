@@ -57,14 +57,16 @@ cp scripts/start.sh scripts/stop.sh dist/
 echo "=== [4/4] staticx（静态化，摆脱 glibc 版本依赖）==="
 # PyInstaller 产物依赖构建机的 glibc；staticx 把 glibc 打入二进制，
 # 使其可在任意 x86_64 Linux（含 CentOS 7 等老 glibc 系统）运行
-# staticx 默认用 /tmp 解包（小内存机器 tmpfs 易满），改到构建目录下
-STATICX_FLAGS="--tempdir /root/build_mcp/staticx-tmp"
+# staticx 打包时在 $TMPDIR 解包（默认 /tmp，小内存机器 tmpfs 易满），改到构建目录下
+STATICX_FLAGS=""
 mkdir -p /root/build_mcp/staticx-tmp
+export TMPDIR=/root/build_mcp/staticx-tmp
 command -v patchelf >/dev/null 2>&1 || {
   yum install -y patchelf >/dev/null 2>&1 || apt-get install -y patchelf >/dev/null 2>&1 || true
 }
 $PY -m staticx $STATICX_FLAGS dist/mysql_mcp_server dist/mysql_mcp_server.staticx \
   || { echo "STATICX_FAILED（保留非静态版本）"; }
+unset TMPDIR
 if [ -f dist/mysql_mcp_server.staticx ]; then
   mv dist/mysql_mcp_server.staticx dist/mysql_mcp_server
   chmod +x dist/mysql_mcp_server
