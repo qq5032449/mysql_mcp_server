@@ -36,13 +36,17 @@ rm -rf build dist
 # 只补齐 server.py 中延迟/条件 import 的模块
 # --collect-all mysql：mysql-connector 的认证插件（plugins/mysql_native_password）
 # 与错误消息（locales/eng）均为运行时动态加载，必须整体收集
-# --collect-all dmPython：达梦驱动的 DPI 动态库（.so/.dll）为运行时加载，必须整体收集
+# dmPython 是单 .so 模块（非包），--collect-all 不生效；用 --collect-binaries
+# 收集其 .so 及 dmpython.libs/ 下的 DPI 库（libdmdpi），dmssl/ 下的加密库
+SITE=$($PY -c "import site; print(site.getsitepackages()[0])")
 $PY -m PyInstaller --onefile --name mysql_mcp_server \
   --hidden-import mcp.server.sse \
   --hidden-import mcp.server.transport_security \
   --hidden-import mcp.server.lowlevel.server \
   --collect-all mysql \
-  --collect-all dmPython \
+  --collect-binaries dmPython \
+  --add-binary "$SITE/dmpython.libs/*.so:dmpython.libs" \
+  --add-data "$SITE/dmssl:dmssl" \
   --collect-data mysql_mcp_server \
   --paths src \
   --distpath dist \
@@ -53,7 +57,9 @@ cp scripts/start.sh scripts/stop.sh dist/
 echo "=== [4/4] staticx（静态化，摆脱 glibc 版本依赖）==="
 # PyInstaller 产物依赖构建机的 glibc；staticx 把 glibc 打入二进制，
 # 使其可在任意 x86_64 Linux（含 CentOS 7 等老 glibc 系统）运行
-STATICX_FLAGS=""
+# staticx 默认用 /tmp 解包（小内存机器 tmpfs 易满），改到构建目录下
+STATICX_FLAGS="--tempdir /root/build_mcp/staticx-tmp"
+mkdir -p /root/build_mcp/staticx-tmp
 command -v patchelf >/dev/null 2>&1 || {
   yum install -y patchelf >/dev/null 2>&1 || apt-get install -y patchelf >/dev/null 2>&1 || true
 }
