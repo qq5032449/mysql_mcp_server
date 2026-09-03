@@ -71,12 +71,24 @@ echo "=== [4/4] staticx（静态化，摆脱 glibc 版本依赖）==="
 STATICX_FLAGS=""
 mkdir -p /root/build_mcp/staticx-tmp
 export TMPDIR=/root/build_mcp/staticx-tmp
+# 让 staticx 的 ldd 扫描能找到 dmPython 的 DPI 库与加密库，打入静态包
+if [ -n "${DM_LIB_DIR:-}" ]; then
+  export LD_LIBRARY_PATH="$DM_LIB_DIR/dmpython.libs:$DM_LIB_DIR/dmssl:${LD_LIBRARY_PATH:-}"
+fi
 command -v patchelf >/dev/null 2>&1 || {
   yum install -y patchelf >/dev/null 2>&1 || apt-get install -y patchelf >/dev/null 2>&1 || true
 }
 $PY -m staticx $STATICX_FLAGS dist/mysql_mcp_server dist/mysql_mcp_server.staticx \
   || { echo "STATICX_FAILED（保留非静态版本）"; }
 unset TMPDIR
+# staticx 0.14.2 输出文件名偶发截断一字符，兼容处理
+if [ ! -f dist/mysql_mcp_server.staticx ]; then
+  _trunc=$(ls dist/mysql_mcp_server.static* 2>/dev/null | grep -v "^dist/mysql_mcp_server.staticx$" | head -1)
+  if [ -n "$_trunc" ]; then
+    echo "rename truncated staticx output: $_trunc -> dist/mysql_mcp_server.staticx"
+    mv "$_trunc" dist/mysql_mcp_server.staticx
+  fi
+fi
 if [ -f dist/mysql_mcp_server.staticx ]; then
   mv dist/mysql_mcp_server.staticx dist/mysql_mcp_server
   chmod +x dist/mysql_mcp_server
