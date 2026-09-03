@@ -19,6 +19,11 @@ fi
 
 mkdir -p "$LOG_DIR" "$CONFIG_DIR"
 
+# staticx 单文件运行时需解包到临时目录；系统 /tmp 可能是小 tmpfs，
+# 改到应用目录下避免空间不足导致 tar_extract_all 失败
+export TMPDIR="${TMPDIR:-$APP_DIR/tmp}"
+mkdir -p "$TMPDIR"
+
 export MCP_TRANSPORT="${MCP_TRANSPORT:-sse}"
 export MCP_SSE_HOST="${MCP_SSE_HOST:-0.0.0.0}"
 export MCP_SSE_PORT="${MCP_SSE_PORT:-8000}"
