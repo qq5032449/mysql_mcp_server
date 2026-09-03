@@ -78,6 +78,11 @@ fi
 command -v patchelf >/dev/null 2>&1 || {
   yum install -y patchelf >/dev/null 2>&1 || apt-get install -y patchelf >/dev/null 2>&1 || true
 }
+# dmssl 加密库是 dlopen 按名加载（非 ELF DT_NEEDED），staticx 扫描不到，
+# 用 -l 强制打入包内，运行时与其它内置库同目录解压即可被找到
+if [ -n "${DM_LIB_DIR:-}" ]; then
+  STATICX_FLAGS="$STATICX_FLAGS -l $DM_LIB_DIR/dmssl/libssl.so -l $DM_LIB_DIR/dmssl/libcrypto.so"
+fi
 # staticx 0.14.2 对长输出文件名有截断 bug（mysql_mcp_server.staticx → mysql_mcp_serve），
 # 用短名输出再改名绕过
 $PY -m staticx $STATICX_FLAGS dist/mysql_mcp_server dist/out.staticx \
