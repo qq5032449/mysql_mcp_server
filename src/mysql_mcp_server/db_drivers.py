@@ -168,9 +168,37 @@ def build_config(entry: dict, role: str, host=None, port=None) -> dict:
     return {k: v for k, v in cfg.items() if v is not None}
 
 
+def _ensure_dm_ssl_path() -> None:
+    """确保 dmPython 能找到加密模块（libssl）。
+
+    官方要求 LD_LIBRARY_PATH 指向 dmPython 安装目录下的 dmssl 子目录；
+    单文件打包（PyInstaller onefile）运行时该目录位于 sys._MEIPASS 下，
+    在 import dmPython 前把两处候选路径都加入 LD_LIBRARY_PATH。
+    """
+    import os
+    import sys
+
+    candidates = []
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        candidates.append(os.path.join(meipass, "dmssl"))
+    try:
+        import site
+        for sp in site.getsitepackages() + [site.getusersitepackages()]:
+            candidates.append(os.path.join(sp, "dmssl"))
+    except Exception:
+        pass
+    existing = os.environ.get("LD_LIBRARY_PATH", "")
+    paths = [p for p in candidates if os.path.isdir(p) and p not in existing.split(":")]
+    if paths:
+        os.environ["LD_LIBRARY_PATH"] = ":".join([*paths, existing] if existing else paths)
+        logger.debug("LD_LIBRARY_PATH extended with dmssl: %s", paths)
+
+
 def connect_entry(entry: dict, role: str, host=None, port=None):
     """按条目类型建立 DB API 2.0 连接；调用方负责 close（支持 with）。"""
     if entry_db_type(entry) == DAMENG:
+        _ensure_dm_ssl_path()
         try:
             import dmPython
         except ImportError:
