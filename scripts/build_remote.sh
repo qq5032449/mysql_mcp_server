@@ -10,11 +10,11 @@ PY=/root/build_mcp/venv/bin/python
 
 echo "=== [2/4] pip install (pinned mcp<2) ==="
 $PY -m pip install --quiet --no-cache-dir --upgrade pip
-$PY -m pip install --no-cache-dir "mcp>=1.2.0,<2" . pyinstaller staticx
+$PY -m pip install --no-cache-dir "mcp>=1.2.0,<2" ".[dameng]" pyinstaller staticx
 rc=$?
 if [ $rc -ne 0 ]; then
   echo "RETRY with tsinghua mirror"
-  $PY -m pip install --no-cache-dir -i https://pypi.tuna.tsinghua.edu.cn/simple "mcp>=1.2.0,<2" . pyinstaller || { echo "INSTALL_FAILED"; exit 1; }
+  $PY -m pip install --no-cache-dir -i https://pypi.tuna.tsinghua.edu.cn/simple "mcp>=1.2.0,<2" ".[dameng]" pyinstaller || { echo "INSTALL_FAILED"; exit 1; }
 fi
 $PY -c "import mcp; print('mcp version:', mcp.__version__ if hasattr(mcp,'__version__') else 'n/a')"
 
@@ -36,11 +36,13 @@ rm -rf build dist
 # 只补齐 server.py 中延迟/条件 import 的模块
 # --collect-all mysql：mysql-connector 的认证插件（plugins/mysql_native_password）
 # 与错误消息（locales/eng）均为运行时动态加载，必须整体收集
+# --collect-all dmPython：达梦驱动的 DPI 动态库（.so/.dll）为运行时加载，必须整体收集
 $PY -m PyInstaller --onefile --name mysql_mcp_server \
   --hidden-import mcp.server.sse \
   --hidden-import mcp.server.transport_security \
   --hidden-import mcp.server.lowlevel.server \
   --collect-all mysql \
+  --collect-all dmPython \
   --collect-data mysql_mcp_server \
   --paths src \
   --distpath dist \

@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **Dameng DM8 Support:** each database entry now carries a `db_type` (`mysql`/`dameng`, defaults to `mysql` so existing configs migrate with zero changes). Dameng entries connect via `dmPython` (optional `dameng` extra: `pip install "mysql_mcp_server[dameng]"`), with DM-dialect metadata queries (`USER_TABLES`/`ALL_TABLES`/`ALL_TAB_COLUMNS`), double-quote identifiers, default port 5236, and `database` mapped to schema. All three tools, confirmation flow, audit, and alias/project matching work identically across both types. Admin UI gains a database-type selector. Single-file build (`build_remote.sh`) collects dmPython runtime libraries.
+
 ## [0.4.4] - 2026-07-30
 
 ### Fixed

@@ -11,7 +11,6 @@ from contextlib import contextmanager
 from typing import List, Optional, Tuple, Any
 
 import anyio
-from mysql.connector import connect, Error
 from mcp.server import Server
 from mcp.server.sse import SseServerTransport
 from mcp.types import (
@@ -24,7 +23,7 @@ from starlette.applications import Starlette
 from starlette.responses import PlainTextResponse, Response
 from starlette.routing import Mount, Route
 
-from mysql_mcp_server import admin_api, audit, db_config
+from mysql_mcp_server import admin_api, audit, db_config, db_drivers
 from mysql_mcp_server.sql_classify import classify, first_keyword, cte_main_keyword
 
 # Load environment variables from .env file if it exists.
@@ -62,22 +61,11 @@ def parse_table_arg(name: str) -> Tuple[Optional[str], str]:
 # ---------------------------------------------------------------------------
 
 def build_connector_config(entry: dict, role: str, host=None, port=None) -> dict:
-    """从别名条目构造 mysql.connector 配置；role='read'|'write' 选择对应账号。"""
-    acct = entry[f"{role}_user"]
-    config = {
-        "host": host or entry["host"],
-        "port": port or int(entry.get("port", 3306)),
-        "user": acct["user"],
-        "password": acct["password"],
-        "charset": entry.get("charset") or "utf8mb4",
-        "collation": entry.get("collation") or "utf8mb4_unicode_ci",
-        "autocommit": True,
-        "sql_mode": entry.get("sql_mode") or "TRADITIONAL",
-        "connect_timeout": int(entry.get("connect_timeout", 10)),
-    }
-    if entry.get("database"):
-        config["database"] = entry["database"]
-    return {k: v for k, v in config.items() if v is not None}
+    """从别名条目构造驱动原生连接配置；role='read'|'write' 选择对应账号。
+
+    保留原函数名兼容旧测试与调用方，内部委托 db_drivers.build_config。
+    """
+    return db_drivers.build_config(entry, role, host, port)
 
 
 @contextmanager
@@ -284,26 +272,26 @@ async def list_resources_impl(alias: str | None = None) -> list[Resource]:
 
     def _sync_list():
         with maybe_ssh_tunnel_for(entry) as (host, port):
-            config = build_connector_config(entry, "read", host, port)
             try:
-                with connect(**config) as conn:
+                with db_drivers.connect_entry(entry, "read", host, port) as conn:
                     with conn.cursor() as cursor:
-                        if "database" not in config:
-                            # Multi-database mode: list available databases.
-                            cursor.execute("SHOW DATABASES")
+                        if not entry.get("database"):
+                            # Multi-database mode: list available databases/schemas.
+                            cursor.execute(db_drivers.list_schemas_sql(entry))
                             databases = cursor.fetchall()
+                            label = "schema" if db_drivers.entry_db_type(entry) == db_drivers.DAMENG else "database"
                             return [
                                 Resource(
                                     uri=f"mysql://database/{db[0]}",
                                     name=f"database_{db[0]}",
                                     mimeType="text/plain",
-                                    description=f"MySQL database: {db[0]}"
+                                    description=f"{label}: {db[0]}"
                                 )
                                 for db in databases if db[0] not in SYSTEM_DATABASES
                             ]
                         else:
                             # Single-database mode: list tables in the configured database.
-                            cursor.execute("SHOW TABLES")
+                            cursor.execute(db_drivers.list_tables_sql(entry))
                             tables = cursor.fetchall()
                             resources = []
                             for table in tables:
@@ -316,9 +304,8 @@ async def list_resources_impl(alias: str | None = None) -> list[Resource]:
                                     )
                                 )
                             return resources
-            except Error as e:
-                error_msg = getattr(e, 'msg', None) or str(e) or 'Unknown MySQL error'
-                logger.error(f"Failed to list resources: {error_msg}")
+            except Exception as e:
+                logger.error(f"Failed to list resources: {db_drivers.error_message(entry, e)}")
                 return []
 
     return await anyio.to_thread.run_sync(_sync_list)
@@ -353,7 +340,6 @@ async def read_resource_impl(alias: str | None = None, uri: AnyUrl = None) -> st
 
     def _sync_read():
         with maybe_ssh_tunnel_for(entry) as (host, port):
-            config = build_connector_config(entry, "read", host, port)
             uri_str = str(uri)
             if not uri_str.startswith("mysql://"):
                 raise ValueError(f"Invalid URI scheme: {uri_str}")
@@ -364,32 +350,37 @@ async def read_resource_impl(alias: str | None = None, uri: AnyUrl = None) -> st
             if len(parts) >= 2 and parts[0] == "database":
                 db_name = validate_identifier(parts[1])
                 try:
-                    with connect(**config) as conn:
+                    with db_drivers.connect_entry(entry, "read", host, port) as conn:
                         with conn.cursor() as cursor:
-                            cursor.execute(f"USE `{db_name}`")
-                            cursor.execute("SHOW TABLES")
+                            if db_drivers.entry_db_type(entry) == db_drivers.DAMENG:
+                                cursor.execute(
+                                    "SELECT TABLE_NAME FROM ALL_TABLES WHERE "
+                                    f"UPPER(OWNER) = UPPER({db_drivers.qstr(db_name)}) "
+                                    "ORDER BY TABLE_NAME"
+                                )
+                            else:
+                                cursor.execute(f"USE `{db_name}`")
+                                cursor.execute("SHOW TABLES")
                             tables = cursor.fetchall()
                             result = [f"Tables in database '{db_name}':"]
                             result.extend([table[0] for table in tables])
                             return "\n".join(result)
-                except Error as e:
-                    error_msg = getattr(e, 'msg', None) or str(e) or 'Unknown MySQL error'
-                    raise RuntimeError(f"Database error: {error_msg}")
+                except Exception as e:
+                    raise RuntimeError(f"Database error: {db_drivers.error_message(entry, e)}")
 
             # Handle requests to read data from a specific table.
             table = validate_identifier(parts[0])
             try:
-                with connect(**config) as conn:
+                with db_drivers.connect_entry(entry, "read", host, port) as conn:
                     with conn.cursor() as cursor:
-                        cursor.execute(f"SELECT * FROM `{table}` LIMIT 100")
+                        cursor.execute(db_drivers.sample_sql(None, table, db_drivers.table_sample_default(entry), entry))
                         columns = [desc[0] for desc in cursor.description]
                         rows = cursor.fetchall()
                         # Format output as simple CSV-like text.
                         result = [",".join("" if v is None else str(v) for v in row) for row in rows]
                         return "\n".join([",".join(columns)] + result)
-            except Error as e:
-                error_msg = getattr(e, 'msg', None) or str(e) or 'Unknown MySQL error'
-                raise RuntimeError(f"Database error: {error_msg}")
+            except Exception as e:
+                raise RuntimeError(f"Database error: {db_drivers.error_message(entry, e)}")
 
     return await anyio.to_thread.run_sync(_sync_read)
 
@@ -612,10 +603,14 @@ async def call_tool_impl(name: str, arguments: dict, alias: str | None = None) -
             table_name = arguments.get("table_name")
             if table_name:
                 db, tbl = parse_table_arg(table_name)
-                schema_filter = f"TABLE_SCHEMA = '{db}'" if db else "TABLE_SCHEMA = DATABASE()"
-                query = f"SELECT COLUMN_NAME, DATA_TYPE, IS_NULLABLE, COLUMN_DEFAULT, COLUMN_COMMENT FROM information_schema.COLUMNS WHERE {schema_filter} AND TABLE_NAME = '{tbl}' ORDER BY ORDINAL_POSITION"
+                query = db_drivers.schema_sql(tbl, db, entry)
             else:
-                query = "SELECT TABLE_NAME, COLUMN_NAME, DATA_TYPE, IS_NULLABLE FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() ORDER BY TABLE_NAME, ORDINAL_POSITION"
+                query = db_drivers.schema_sql(None, None, entry)
+            if db_drivers.entry_db_type(entry) == db_drivers.DAMENG:
+                return await run_query_entry(
+                    entry, query, "read",
+                    row_mapper=lambda r: db_drivers.schema_row_to_csv(r, entry),
+                )
             return await run_query_entry(entry, query, "read")
 
         elif name == "get_table_sample":
@@ -628,8 +623,7 @@ async def call_tool_impl(name: str, arguments: dict, alias: str | None = None) -
             _, entry = resolved
             db, tbl = parse_table_arg(arguments.get("table_name"))
             limit = min(arguments.get("limit", 5), 20)
-            table_ref = f"`{db}`.`{tbl}`" if db else f"`{tbl}`"
-            query = f"SELECT * FROM {table_ref} LIMIT {limit}"
+            query = db_drivers.sample_sql(db, tbl, limit, entry)
             return await run_query_entry(entry, query, "read")
 
         else:
@@ -724,7 +718,7 @@ async def get_prompt(name: str, arguments: dict | None) -> GetPromptResult:
     else:
         raise ValueError(f"Unknown prompt: {name}")
 
-def _format_query_result(cursor, conn, query: str, config: dict) -> list[TextContent]:
+def _format_query_result(cursor, conn, query: str, config: dict, row_mapper=None) -> list[TextContent]:
     """按查询类型格式化结果（从原 run_query 提取，逻辑不变）。"""
     query_upper = query.strip().upper()
 
@@ -748,6 +742,8 @@ def _format_query_result(cursor, conn, query: str, config: dict) -> list[TextCon
         rows = cursor.fetchall()
         if not rows:
             return [TextContent(type="text", text="Query executed successfully. No results returned.")]
+        if row_mapper is not None:
+            rows = [row_mapper(r) for r in rows]
         result = [",".join("" if v is None else str(v) for v in row) for row in rows]
         return [TextContent(type="text", text="\n".join([",".join(columns)] + result))]
 
@@ -755,18 +751,17 @@ def _format_query_result(cursor, conn, query: str, config: dict) -> list[TextCon
     return [TextContent(type="text", text=f"Query executed successfully. Rows affected: {cursor.rowcount}")]
 
 
-async def run_query_entry(entry: dict, query: str, role: str) -> list[TextContent]:
+async def run_query_entry(entry: dict, query: str, role: str, row_mapper=None) -> list[TextContent]:
     """用别名条目 + 指定角色账号执行 SQL。"""
     def _sync_run():
         with maybe_ssh_tunnel_for(entry) as (host, port):
-            config = build_connector_config(entry, role, host, port)
             try:
-                with connect(**config) as conn:
+                with db_drivers.connect_entry(entry, role, host, port) as conn:
                     with conn.cursor() as cursor:
                         cursor.execute(query)
-                        return _format_query_result(cursor, conn, query, config)
-            except Error as e:
-                error_msg = getattr(e, 'msg', None) or str(e) or 'Unknown MySQL error'
+                        return _format_query_result(cursor, conn, query, db_drivers.build_config(entry, role, host, port), row_mapper=row_mapper)
+            except Exception as e:
+                error_msg = db_drivers.error_message(entry, e)
                 logger.error(f"Error executing SQL: {error_msg}")
                 return [TextContent(type="text", text=f"Error executing query: {error_msg}")]
     return await anyio.to_thread.run_sync(_sync_run)

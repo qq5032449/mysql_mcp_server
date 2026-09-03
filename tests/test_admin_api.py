@@ -245,7 +245,7 @@ class TestSettings:
 class TestConnection:
     def test_read_ok(self, client, no_env):
         client.post("/api/databases", json=payload())
-        with patch("mysql_mcp_server.admin_api.mysql.connector.connect") as m:
+        with patch("mysql.connector.connect") as m:
             m.return_value = MagicMock()
             r = client.post("/api/databases/db1/test", json={})
         assert r.status_code == 200
@@ -256,7 +256,7 @@ class TestConnection:
 
     def test_write_account(self, client, no_env):
         client.post("/api/databases", json=payload())
-        with patch("mysql_mcp_server.admin_api.mysql.connector.connect") as m:
+        with patch("mysql.connector.connect") as m:
             m.return_value = MagicMock()
             r = client.post("/api/databases/db1/test", json={"as_write": True})
         assert r.status_code == 200
@@ -264,7 +264,7 @@ class TestConnection:
 
     def test_failure_detail(self, client, no_env):
         client.post("/api/databases", json=payload())
-        with patch("mysql_mcp_server.admin_api.mysql.connector.connect",
+        with patch("mysql.connector.connect",
                    side_effect=type("E", (Exception,), {"msg": "Access denied"})):
             r = client.post("/api/databases/db1/test", json={})
         assert r.status_code == 200

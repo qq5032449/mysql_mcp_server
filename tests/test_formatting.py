@@ -1,4 +1,4 @@
-import pytest
+﻿import pytest
 from unittest.mock import MagicMock, patch
 from mysql_mcp_server import db_config
 from mysql_mcp_server.server import call_tool
@@ -18,7 +18,7 @@ def _env_config(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-@patch("mysql_mcp_server.server.connect")
+@patch("mysql_mcp_server.db_drivers.connect_entry")
 async def test_call_tool_describe_formatting(mock_connect):
     """Test that DESCRIBE queries are formatted correctly with NULL handling."""
     # Mock cursor behavior
@@ -48,7 +48,7 @@ async def test_call_tool_describe_formatting(mock_connect):
     assert lines[3] == "extra,text,NULL" # NULL should be converted to string "NULL"
 
 @pytest.mark.asyncio
-@patch("mysql_mcp_server.server.connect")
+@patch("mysql_mcp_server.db_drivers.connect_entry")
 async def test_call_tool_empty_results(mock_connect):
     """Test handling of queries that return no results."""
     mock_cursor = MagicMock()
@@ -66,7 +66,7 @@ async def test_call_tool_empty_results(mock_connect):
     assert "No results returned" in response[0].text
 
 @pytest.mark.asyncio
-@patch("mysql_mcp_server.server.connect")
+@patch("mysql_mcp_server.db_drivers.connect_entry")
 async def test_call_tool_show_tables(mock_connect, monkeypatch):
     """Test SHOW TABLES formatting."""
     monkeypatch.setenv("MYSQL_DATABASE", "test_db")
@@ -87,7 +87,7 @@ async def test_call_tool_show_tables(mock_connect, monkeypatch):
     assert "orders" in response[0].text
 
 @pytest.mark.asyncio
-@patch("mysql_mcp_server.server.connect")
+@patch("mysql_mcp_server.db_drivers.connect_entry")
 async def test_list_resources_identifier_safe(mock_connect, monkeypatch):
     """Test that resources have identifier-safe names for strict LLMs (Issue #39)."""
     from mysql_mcp_server.server import list_resources
@@ -111,7 +111,7 @@ async def test_list_resources_identifier_safe(mock_connect, monkeypatch):
     assert str(resources[0].uri) == "mysql://users/data"
 
 @pytest.mark.asyncio
-@patch("mysql_mcp_server.server.connect")
+@patch("mysql_mcp_server.db_drivers.connect_entry")
 async def test_list_resources_multi_db_safe(mock_connect, monkeypatch):
     """Test that database resources have identifier-safe names."""
     from mysql_mcp_server.server import list_resources

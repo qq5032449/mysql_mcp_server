@@ -20,6 +20,7 @@ _cache: dict | None = None
 
 _ALIAS_RE = re.compile(r"[A-Za-z0-9_-]{1,64}")
 _VALID_POLICIES = {"client_confirm", "elicitation_only"}
+_VALID_DB_TYPES = {"mysql", "dameng"}
 
 
 def _empty_config() -> dict:
@@ -33,6 +34,7 @@ def _env_entry() -> dict | None:
     if not user or password is None:
         return None
     return {
+        "db_type": "mysql",
         "host": os.getenv("MYSQL_HOST", "localhost"),
         "port": int(os.getenv("MYSQL_PORT", "3306")),
         "database": os.getenv("MYSQL_DATABASE"),
@@ -115,6 +117,9 @@ def validate_entry(alias: str, entry: dict) -> None:
             raise ValueError(f"{role}.user 不能为空")
     if entry.get("write_policy", "client_confirm") not in _VALID_POLICIES:
         raise ValueError("write_policy 只能是 client_confirm 或 elicitation_only")
+    db_type = str(entry.get("db_type", "mysql") or "mysql").strip().lower()
+    if db_type not in _VALID_DB_TYPES:
+        raise ValueError("db_type 只能是 mysql 或 dameng")
 
 
 def normalize_entry(entry: dict) -> dict:
@@ -146,7 +151,11 @@ def normalize_entry(entry: dict) -> dict:
         raise ValueError("projects 必须是字符串或字符串列表")
 
     ssh = entry.get("ssh") or {}
+    db_type = str(entry.get("db_type", "mysql") or "mysql").strip().lower()
+    if db_type not in _VALID_DB_TYPES:
+        db_type = "mysql"
     return {
+        "db_type": db_type,
         "host": entry.get("host", "localhost"),
         "port": int(entry.get("port", 3306)),
         "database": entry.get("database") or None,

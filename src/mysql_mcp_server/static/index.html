@@ -99,9 +99,16 @@
         <legend>基本信息</legend>
         <div class="grid">
           <div><label>别名 *</label><input id="f_alias" required placeholder="prod_main"></div>
+          <div>
+            <label>数据库类型</label>
+            <select id="f_db_type">
+              <option value="mysql">MySQL</option>
+              <option value="dameng">达梦 DM8</option>
+            </select>
+          </div>
           <div><label>主机 *</label><input id="f_host" required placeholder="localhost"></div>
-          <div><label>端口</label><input id="f_port" placeholder="3306"></div>
-          <div><label>数据库名</label><input id="f_database" placeholder="mydb"></div>
+          <div><label>端口</label><input id="f_port" placeholder="3306（达梦默认 5236）"></div>
+          <div><label>数据库名</label><input id="f_database" placeholder="mydb（达梦填模式名）"></div>
           <div><label>字符集</label><input id="f_charset" placeholder="utf8mb4"></div>
           <div>
             <label>项目名称</label>
@@ -174,6 +181,8 @@ const POLICY_LABEL = {
   client_confirm: "client_confirm（客户端确认）",
   elicitation_only: "elicitation_only（仅服务端确认）",
 };
+const DBTYPE_LABEL = { mysql: "MySQL", dameng: "达梦" };
+const DBTYPE_PORT = { mysql: "3306", dameng: "5236" };
 
 let dbs = { default_alias: null, databases: {} };
 let editingAlias = null;
@@ -235,6 +244,7 @@ function renderDbs() {
     return `<div class="db-item">
       <div class="db-head">
         <span class="db-alias">${esc(a)}</span>
+        <span class="badge">${esc(DBTYPE_LABEL[d.db_type] || d.db_type || "MySQL")}</span>
         ${isDefault
           ? '<span class="badge default">默认</span>'
           : `<button class="btn" onclick="setDefault('${esc(a)}')">设为默认</button>`}
@@ -301,9 +311,11 @@ function openModal(alias) {
   $("f_read_pass").placeholder = passPh;
   $("f_write_pass").placeholder = passPh;
   $("detailsSsh").open = false;
+  $("f_db_type").value = "mysql";
   if (alias) {
     const d = dbs.databases[alias] || {};
     $("f_alias").value = alias;
+    $("f_db_type").value = d.db_type || "mysql";
     $("f_host").value = d.host || "";
     $("f_port").value = d.port ?? "";
     $("f_database").value = d.database || "";
@@ -337,10 +349,12 @@ function collectForm() {
     const n = Number(v);
     return Number.isFinite(n) ? n : v;  // 非法值交给后端返回 400 中文提示
   };
+  const dbType = $("f_db_type").value || "mysql";
   return {
     alias: val("f_alias"),
+    db_type: dbType,
     host: val("f_host"),
-    port: num("f_port", 3306),
+    port: num("f_port", dbType === "dameng" ? 5236 : 3306),
     database: val("f_database") || null,
     charset: val("f_charset") || "utf8mb4",
     projects: val("f_projects") ? val("f_projects").split(/[,，\s]+/).filter(Boolean) : [],
@@ -400,6 +414,12 @@ async function setDefault(alias) {
 }
 
 /* ---------- 事件绑定与初始化 ---------- */
+$("f_db_type").onchange = () => {
+  const t = $("f_db_type").value;
+  if ($("f_port").value.trim() === "" || Object.values(DBTYPE_PORT).includes($("f_port").value.trim()))
+    $("f_port").value = "";
+  $("f_port").placeholder = t === "dameng" ? "5236" : "3306";
+};
 $("btnAdd").onclick = () => openModal(null);
 $("btnCancel").onclick = closeModal;
 $("modalMask").onclick = e => { if (e.target === $("modalMask")) closeModal(); };

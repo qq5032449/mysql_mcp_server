@@ -11,7 +11,6 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 import anyio
-import mysql.connector
 from starlette.applications import Starlette
 from starlette.middleware import Middleware
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -20,7 +19,7 @@ from starlette.responses import JSONResponse
 from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 
-from mysql_mcp_server import audit, db_config
+from mysql_mcp_server import audit, db_config, db_drivers
 
 logger = logging.getLogger("mysql_mcp_server.admin_api")
 
@@ -161,22 +160,37 @@ async def test_connection(request: Request):
     if entry is None:
         return JSONResponse({"error": f"别名 {alias} 不存在"}, status_code=404)
     role = "write" if body.get("as_write") else "read"
-    acct = entry[f"{role}_user"]
-    conn_cfg = {
-        "host": entry["host"],
-        "port": int(entry.get("port", 3306)),
-        "user": acct["user"],
-        "password": acct["password"],
-        "connect_timeout": 5,
-    }
-
-    def _try() -> str | None:
+    if db_drivers.entry_db_type(entry) == db_drivers.DAMENG:
         try:
-            conn = mysql.connector.connect(**conn_cfg)
-            conn.close()
-            return None
-        except Exception as e:
-            return str(getattr(e, "msg", None) or e)
+            import dmPython
+        except ImportError:
+            return JSONResponse({"ok": False, "error": "未安装 dmPython 驱动：pip install dmPython", "role": role})
+
+        def _try() -> str | None:
+            try:
+                conn = db_drivers.connect_entry(entry, role)
+                conn.close()
+                return None
+            except Exception as e:
+                return db_drivers.error_message(entry, e)
+    else:
+        import mysql.connector
+        acct = entry[f"{role}_user"]
+        conn_cfg = {
+            "host": entry["host"],
+            "port": int(entry.get("port", 3306)),
+            "user": acct["user"],
+            "password": acct["password"],
+            "connect_timeout": 5,
+        }
+
+        def _try() -> str | None:
+            try:
+                conn = mysql.connector.connect(**conn_cfg)
+                conn.close()
+                return None
+            except Exception as e:
+                return str(getattr(e, "msg", None) or e)
 
     error = await anyio.to_thread.run_sync(_try)
     if error is None:
