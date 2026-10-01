@@ -1,0 +1,100 @@
+{
+  "manifest_version": "0.4",
+  "name": "mysql-mcp-server",
+  "display_name": "MySQL MCP Server",
+  "version": "0.5.0",
+  "description": "Secure MySQL access for AI assistants: list tables, inspect schemas, sample data, and execute SQL with read/write account separation and two-step confirmation for writes.",
+  "long_description": "A Model Context Protocol (MCP) server for MySQL. AI assistants can discover tables, inspect column metadata, sample rows, and run ad-hoc SQL. Reads use a read-only account; writes and deletes require explicit user confirmation (server popup or chat-based token flow, with a 6-second cooling period). Failed executions are recorded to a local error log. Multi-database aliases, SSH tunnels, and Dameng DM8 are supported via the config file; bundle mode configures a single database through the install UI.",
+  "author": {
+    "name": "Dana K. Williams",
+    "url": "https://github.com/designcomputer/mysql_mcp_server"
+  },
+  "homepage": "https://github.com/designcomputer/mysql_mcp_server",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/designcomputer/mysql_mcp_server.git"
+  },
+  "license": "MIT",
+  "keywords": ["mysql", "database", "sql", "mcp"],
+  "compatibility": {
+    "platforms": ["darwin", "linux", "win32"],
+    "runtimes": {
+      "python": ">=3.11"
+    }
+  },
+  "server": {
+    "type": "uv",
+    "entry_point": "server.py",
+    "mcp_config": {
+      "command": "uv",
+      "args": ["run", "--directory", "${__dirname}", "server.py"],
+      "env": {
+        "MYSQL_HOST": "${user_config.mysql_host}",
+        "MYSQL_PORT": "${user_config.mysql_port}",
+        "MYSQL_USER": "${user_config.mysql_user}",
+        "MYSQL_PASSWORD": "${user_config.mysql_password}",
+        "MYSQL_DATABASE": "${user_config.mysql_database}",
+        "MYSQL_ALLOW_DELETE": "${user_config.mysql_allow_delete}",
+        "MYSQL_MCP_CONFIG_DIR": "${__dirname}/config"
+      }
+    }
+  },
+  "tools": [
+    {
+      "name": "execute_sql",
+      "description": "Execute a SQL statement (SELECT, DML, SHOW, DESCRIBE). Single statements only; use database.table notation. Writes/deletes need user confirmation: either a prompt appears, or the first call returns a confirm_token to re-call with after explicit user consent."
+    },
+    {
+      "name": "get_schema_info",
+      "description": "Get column metadata for a table or all tables: names, types, nullability, defaults, comments. Accepts database.table notation."
+    },
+    {
+      "name": "get_table_sample",
+      "description": "Fetch a small sample of rows from a table (default 5, max 20). Accepts database.table notation."
+    }
+  ],
+  "user_config": {
+    "mysql_host": {
+      "type": "string",
+      "title": "MySQL Host",
+      "description": "Hostname of your MySQL server.",
+      "default": "localhost",
+      "required": false
+    },
+    "mysql_port": {
+      "type": "number",
+      "title": "MySQL Port",
+      "description": "Port of your MySQL server.",
+      "default": 3306,
+      "min": 1,
+      "max": 65535,
+      "required": false
+    },
+    "mysql_user": {
+      "type": "string",
+      "title": "MySQL User",
+      "description": "Username for MySQL authentication.",
+      "required": true
+    },
+    "mysql_password": {
+      "type": "string",
+      "title": "MySQL Password",
+      "description": "Password for MySQL authentication.",
+      "sensitive": true,
+      "required": true
+    },
+    "mysql_database": {
+      "type": "string",
+      "title": "MySQL Database",
+      "description": "Database to connect to. Leave empty for multi-database mode.",
+      "required": false
+    },
+    "mysql_allow_delete": {
+      "type": "boolean",
+      "title": "Allow DELETE / DROP",
+      "description": "Permit DELETE, TRUNCATE and DROP statements (still require per-statement confirmation). Data loss cannot be undone.",
+      "default": false,
+      "required": false
+    }
+  }
+}

@@ -1,4 +1,4 @@
-"""管理页面 REST API：配置 CRUD、连接测试、默认别名设置、审计、健康检查。
+"""管理页面 REST API：配置 CRUD、连接测试、默认别名设置、审计、错误日志、健康检查。
 
 访问控制：回环客户端直接放行；非回环需 ADMIN_TOKEN 令牌（未设置则仅回环）。
 配置变更通过回调通知（server 模块注册以失效别名实例缓存）。
@@ -19,7 +19,7 @@ from starlette.responses import JSONResponse
 from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 
-from mysql_mcp_server import audit, db_config, db_drivers
+from mysql_mcp_server import audit, db_config, db_drivers, error_log, ssh_tunnel
 
 logger = logging.getLogger("mysql_mcp_server.admin_api")
 
@@ -152,6 +152,33 @@ async def delete_database(request: Request):
     return JSONResponse({"ok": True, "default_alias": cfg["default_alias"]})
 
 
+async def export_databases(request: Request):
+    """导出完整配置（含密码，用于备份/迁移；令牌或回环保护，勿外传）。"""
+    return JSONResponse(db_config.load_config())
+
+
+async def import_databases(request: Request):
+    """整份导入配置：校验全部条目后原子替换；导入内容应来自 export_databases。"""
+    body = await _body(request)
+    if not isinstance(body.get("databases"), dict) or not body["databases"]:
+        return JSONResponse({"error": "导入内容必须包含非空的 databases 对象"}, status_code=400)
+    normalized: dict[str, dict] = {}
+    for alias, entry in body["databases"].items():
+        alias = str(alias).strip()
+        try:
+            db_config.validate_entry(alias, entry or {})
+            normalized[alias] = db_config.normalize_entry(entry or {})
+        except ValueError as e:
+            return JSONResponse({"error": f"条目 {alias} 校验失败：{e}"}, status_code=400)
+    default_alias = str(body.get("default_alias") or "").strip() or None
+    if default_alias and default_alias not in normalized:
+        return JSONResponse({"error": f"default_alias {default_alias} 不在导入条目中"}, status_code=400)
+    cfg = {"default_alias": default_alias or sorted(normalized)[0], "databases": normalized}
+    db_config.save_config(cfg)
+    _notify_changed(None)
+    return JSONResponse({"ok": True, "default_alias": cfg["default_alias"], "count": len(normalized)})
+
+
 async def test_connection(request: Request):
     alias = request.path_params["alias"]
     body = await _body(request)
@@ -167,30 +194,65 @@ async def test_connection(request: Request):
             return JSONResponse({"ok": False, "error": "未安装 dmPython 驱动：pip install dmPython", "role": role})
 
         def _try() -> str | None:
-            try:
-                conn = db_drivers.connect_entry(entry, role)
-                conn.close()
-                return None
-            except Exception as e:
-                return db_drivers.error_message(entry, e)
+            # 连接探测不带 schema：先验证实例与账号，再单独校验模式是否存在/可见，
+            # 两类错误可区分（驱动对不存在 schema 的报错信息通常不明确）
+            with ssh_tunnel.maybe_ssh_tunnel_for(entry) as (host, port):
+                probe = {**entry, "database": None}
+                try:
+                    conn = db_drivers.connect_entry(probe, role, host, port)
+                except Exception as e:
+                    return db_drivers.error_message(entry, e)
+                try:
+                    schema = entry.get("database")
+                    if not schema:
+                        return None
+                    with conn.cursor() as cursor:
+                        cursor.execute(
+                            "SELECT USERNAME FROM ALL_USERS WHERE UPPER(USERNAME) = UPPER("
+                            f"{db_drivers.qstr(schema)})"
+                        )
+                        if cursor.fetchone() is None:
+                            return (f"模式（schema）'{schema}' 不存在或当前账号无权访问"
+                                    "（实例连接与账号认证均正常）")
+                    return None
+                except Exception as e:
+                    return db_drivers.error_message(entry, e)
+                finally:
+                    conn.close()
     else:
         import mysql.connector
-        acct = entry[f"{role}_user"]
-        conn_cfg = {
-            "host": entry["host"],
-            "port": int(entry.get("port", 3306)),
-            "user": acct["user"],
-            "password": acct["password"],
-            "connect_timeout": 5,
-        }
+        db_name = entry.get("database")
+        # 复用 build_config（含 use_pure 等统一设置），仅去掉库名：
+        # 连接探测不带 database，先验证实例与账号，库存在性再单独查 SCHEMATA
 
         def _try() -> str | None:
-            try:
-                conn = mysql.connector.connect(**conn_cfg)
-                conn.close()
-                return None
-            except Exception as e:
-                return str(getattr(e, "msg", None) or e)
+            # 连接探测不带 database：先验证实例与账号，再查 SCHEMATA 校验库存在且可见；
+            # 直接带 database 连接只能得到驱动的 "Unknown database"，无法区分两者
+            with ssh_tunnel.maybe_ssh_tunnel_for(entry) as (host, port):
+                conn_cfg = db_drivers.build_config(entry, role, host, port)
+                conn_cfg.pop("database", None)
+                conn_cfg["connect_timeout"] = 5
+                try:
+                    conn = mysql.connector.connect(**conn_cfg)
+                except Exception as e:
+                    return str(getattr(e, "msg", None) or e)
+                try:
+                    if not db_name:
+                        return None  # 多数据库模式：无库名校验
+                    with conn.cursor() as cursor:
+                        cursor.execute(
+                            "SELECT SCHEMA_NAME FROM information_schema.SCHEMATA"
+                            " WHERE SCHEMA_NAME = %s",
+                            (db_name,),
+                        )
+                        if cursor.fetchone() is None:
+                            return (f"数据库 '{db_name}' 不存在或当前账号无权访问"
+                                    "（实例连接与账号认证均正常）")
+                    return None
+                except Exception as e:
+                    return str(getattr(e, "msg", None) or e)
+                finally:
+                    conn.close()
 
     error = await anyio.to_thread.run_sync(_try)
     if error is None:
@@ -212,6 +274,13 @@ async def update_settings(request: Request):
 
 async def get_audit(request: Request):
     return JSONResponse(audit.list_entries())
+
+
+async def get_errors(request: Request):
+    """持久化执行错误查询：?limit=100&alias=db1，最新在前。"""
+    params = request.query_params
+    return JSONResponse(error_log.query_errors(
+        limit=params.get("limit", 100), alias=params.get("alias") or None))
 
 
 async def get_health(request: Request):
@@ -246,11 +315,14 @@ def create_admin_app() -> Starlette:
         routes=[
             Route("/api/databases", get_databases, methods=["GET"]),
             Route("/api/databases", create_database, methods=["POST"]),
+            Route("/api/databases/export", export_databases, methods=["GET"]),
+            Route("/api/databases/import", import_databases, methods=["POST"]),
             Route("/api/databases/{alias}", update_database, methods=["PUT"]),
             Route("/api/databases/{alias}", delete_database, methods=["DELETE"]),
             Route("/api/databases/{alias}/test", test_connection, methods=["POST"]),
             Route("/api/settings", update_settings, methods=["PUT"]),
             Route("/api/audit", get_audit, methods=["GET"]),
+            Route("/api/errors", get_errors, methods=["GET"]),
             Route("/api/health", get_health, methods=["GET"]),
             Mount("/", app=StaticFiles(directory=STATIC_DIR, html=True, check_dir=False), name="admin"),
         ],

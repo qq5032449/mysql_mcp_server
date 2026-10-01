@@ -15,7 +15,9 @@ WRITE_PREFIXES = {"INSERT", "UPDATE", "DELETE", "REPLACE", "CREATE", "ALTER", "D
                   "TRUNCATE", "RENAME", "GRANT", "REVOKE", "SET", "LOCK", "UNLOCK",
                   "CALL", "LOAD", "OPTIMIZE", "ANALYZE", "REPAIR", "FLUSH", "RESET", "KILL"}
 DELETE_PREFIXES = {"DELETE", "TRUNCATE", "DROP"}
-
+# 受 allow_ddl 门控的 DDL/DCL 关键字。DROP/TRUNCATE 属于 delete 类，
+# 仍由 allow_delete 管控（行为与历史版本一致），不在此列。
+DDL_PREFIXES = {"CREATE", "ALTER", "RENAME", "GRANT", "REVOKE"}
 _CTE_MAIN_KEYWORDS = {"SELECT", "INSERT", "UPDATE", "DELETE", "REPLACE", "DROP", "TRUNCATE"}
 _WORD_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_$]*")
 _QUOTES = ("'", '"', "`")
@@ -127,6 +129,32 @@ def cte_main_keyword(sql: str) -> str:
         if tok.upper() in _CTE_MAIN_KEYWORDS:
             return tok.upper()
     return ""
+
+
+def top_level_semicolon_count(sql: str) -> int:
+    """统计括号深度 0 处（引号/注释外）的分号个数，用于多语句判断。
+
+    字符串字面量里的 ';'（如 INSERT ... VALUES ('a;b')）不计数，
+    避免把含分号字面量的单条语句误判为多语句。
+    """
+    text = strip_comments(sql)
+    count = 0
+    for tok in _top_level_tokens(text):
+        if tok == ";":
+            count += 1
+    return count
+
+
+def has_top_level_where(sql: str) -> bool:
+    """UPDATE/DELETE 语句在括号深度 0 处是否出现 WHERE。
+
+    子查询（括号内）的 WHERE 不算：如 UPDATE t SET x=(SELECT ... WHERE ...)
+    顶层无 WHERE，属于全表更新，应提示用户。
+    """
+    for tok in _top_level_tokens(strip_comments(sql)):
+        if tok.upper() == "WHERE":
+            return True
+    return False
 
 
 def classify(sql: str) -> str:

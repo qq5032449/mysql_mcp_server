@@ -2,6 +2,8 @@
 # 服务器端构建脚本：venv 隔离 + 安装依赖 + PyInstaller 打包
 set -uo pipefail
 cd /root/build_mcp || exit 1
+# Windows 侧打包的源码可能带 CRLF，先统一转 LF（bash 对 \r 敏感）
+sed -i 's/\r$//' scripts/*.sh 2>/dev/null || true
 export PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/
 
 echo "=== [1/4] venv ==="

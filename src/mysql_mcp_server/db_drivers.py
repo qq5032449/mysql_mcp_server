@@ -10,6 +10,7 @@
 """
 
 import logging
+import os
 
 logger = logging.getLogger("mysql_mcp_server.db_drivers")
 
@@ -54,6 +55,12 @@ def qualified_table(db: str | None, tbl: str, entry: dict) -> str:
 def qstr(value: str) -> str:
     """SQL 字符串字面量转义（防单引号注入，配置值直拼 SQL 时使用）。"""
     return "'" + str(value).replace("'", "''") + "'"
+
+
+def like_pattern(value: str) -> str:
+    """LIKE 匹配串转义：单引号、反斜杠与 %/_ 通配符，防止关键字里带通配符注入。"""
+    s = str(value).replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return qstr(s)
 
 
 def _dameng_owner(entry: dict, db: str | None) -> str | None:
@@ -112,6 +119,46 @@ def list_schemas_sql(entry: dict) -> str:
     return "SHOW DATABASES"
 
 
+def search_schema_sql(keyword: str, limit: int, entry: dict) -> str:
+    """按关键字搜索表名/列名/注释，返回统一三段结果的 UNION。
+
+    输出列：kind(TABLE/COLUMN)、位置(库.表 或 表名)、对象名、备注。
+    MySQL 单库模式（配置了 database）只搜该库，多库模式搜全部非系统库；
+    达梦按默认模式搜索。
+    """
+    kw = like_pattern(f"%{keyword}%")
+    lim = f"LIMIT {int(limit)}"
+    if entry_db_type(entry) == DAMENG:
+        owner = _dameng_owner(entry, None)
+        owner_filt = f" AND UPPER(OWNER) = UPPER({qstr(owner)})" if owner else ""
+        return (
+            "SELECT * FROM ("
+            f"SELECT 'TABLE' AS KIND, TABLE_NAME AS LOC, TABLE_NAME AS NAME, NULL AS REMARK "
+            f"FROM ALL_TABLES WHERE 1=1{owner_filt} AND TABLE_NAME LIKE {kw} ESCAPE '\\' "
+            "UNION ALL "
+            f"SELECT 'COLUMN' AS KIND, TABLE_NAME AS LOC, COLUMN_NAME AS NAME, COMMENTS AS REMARK "
+            f"FROM ALL_TAB_COLUMNS WHERE 1=1{owner_filt} "
+            f"AND (COLUMN_NAME LIKE {kw} ESCAPE '\\' OR COMMENTS LIKE {kw} ESCAPE '\\') "
+            f") {lim}"
+        )
+    scope = (
+        f"TABLE_SCHEMA = {qstr(entry['database'])}"
+        if entry.get("database")
+        else ("TABLE_SCHEMA NOT IN ('information_schema', 'mysql', 'performance_schema', 'sys')")
+    )
+    return (
+        "SELECT * FROM ("
+        "SELECT 'TABLE' AS KIND, CONCAT(TABLE_SCHEMA, '.', TABLE_NAME) AS LOC, "
+        "TABLE_NAME AS NAME, TABLE_COMMENT AS REMARK FROM information_schema.TABLES "
+        f"WHERE {scope} AND TABLE_NAME LIKE {kw} "
+        "UNION ALL "
+        "SELECT 'COLUMN' AS KIND, CONCAT(TABLE_SCHEMA, '.', TABLE_NAME) AS LOC, "
+        "COLUMN_NAME AS NAME, COLUMN_COMMENT AS REMARK FROM information_schema.COLUMNS "
+        f"WHERE {scope} AND (COLUMN_NAME LIKE {kw} OR COLUMN_COMMENT LIKE {kw}) "
+        f") {lim}"
+    )
+
+
 def table_sample_default(entry: dict) -> int:
     return 100
 
@@ -135,6 +182,34 @@ def error_message(entry: dict, e: Exception) -> str:
     if entry_db_type(entry) == DAMENG:
         return _dameng_error_message(e)
     return _mysql_error_message(e)
+
+
+def mysql_use_pure() -> bool:
+    """MySQL 连接是否强制走纯 Python 实现（默认 True）。
+
+    mysql-connector 26.7+ 的 C 扩展按 `_mysql_connector.__file__` 相对路径查找
+    自带认证插件（mysql/vendor/plugin/*.so），PyInstaller 单文件冻结后该路径
+    不存在，会回退到系统 /usr/lib/mysql/plugin——目标机通常没有，导致
+    mysql_native_password 认证直接报 “plugin cannot be loaded”。
+    纯 Python 路径的插件模块（mysql.connector.plugins.*）会被 --collect-all mysql
+    一并收集，冻结后行为稳定。显式设置 MYSQL_USE_PURE=false 可恢复 C 扩展。
+    """
+    env = os.getenv("MYSQL_USE_PURE")
+    if env is not None:
+        return env.strip().lower() != "false"
+    return True
+
+
+def query_timeout_seconds(entry: dict) -> int:
+    """语句超时（秒）：条目 query_timeout 优先，其次 MYSQL_MCP_QUERY_TIMEOUT，默认 60；0 表示不限。"""
+    value = (entry or {}).get("query_timeout")
+    if value is None:
+        value = os.getenv("MYSQL_MCP_QUERY_TIMEOUT")
+    try:
+        timeout = int(value)
+    except (TypeError, ValueError):
+        timeout = 60
+    return max(0, timeout)
 
 
 def build_config(entry: dict, role: str, host=None, port=None) -> dict:
@@ -162,7 +237,14 @@ def build_config(entry: dict, role: str, host=None, port=None) -> dict:
         "autocommit": True,
         "sql_mode": entry.get("sql_mode") or "TRADITIONAL",
         "connect_timeout": int(entry.get("connect_timeout", 10)),
+        "use_pure": mysql_use_pure(),
     }
+    timeout = query_timeout_seconds(entry)
+    if timeout > 0:
+        # 读超时兜底慢查询/挂起语句（MySQL 服务端 max_execution_time 只覆盖 SELECT，
+        # 且需要额外会话设置；socket 级超时对所有语句生效且实现简单）。
+        cfg["read_timeout"] = timeout
+        cfg["write_timeout"] = timeout
     if entry.get("database"):
         cfg["database"] = entry["database"]
     return {k: v for k, v in cfg.items() if v is not None}

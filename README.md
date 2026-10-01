@@ -2,15 +2,23 @@
 
 本项目基于 [designcomputer/mysql_mcp_server](https://github.com/designcomputer/mysql_mcp_server) 二次开发。原有功能（工具、Prompts、环境变量配置等）请参考上游文档，**本文只介绍本仓库新增的功能**：
 
-- **Web 管理页面** — 浏览器中管理多个数据库连接，无需改配置文件重启
+- **Web 管理页面** — 浏览器中管理多个数据库连接，无需改配置文件重启；支持配置导出/导入备份与一键连通性体检
 - **多数据库别名** — 一个服务端同时服务多个库，客户端按别名接入
 - **读/写双账号** — 查询走只读账号，写操作确认后走读写账号
 - **SQL 三级判定** — 每条语句自动判定 读 / 写 / 删除
 - **写操作双通道确认** — MCP elicitation 弹窗，或聊天内令牌二次确认
 - **令牌冷静期** — 签发后 6 秒内不可使用，杜绝绕过用户确认
 - **删除权限开关** — DELETE / TRUNCATE / DROP 默认拒绝，需显式开启
+- **DDL 权限开关** — CREATE / ALTER / RENAME / GRANT / REVOKE 默认拒绝，按别名显式开启
+- **全表写警告** — UPDATE / DELETE 无 WHERE 时确认文案附加全表影响警示
 - **写免确认开关** — 可选让 INSERT / UPDATE 等写操作跳过二次确认
-- **写操作审计** — 所有写操作尝试（含被拒）记录在页面与日志文件
+- **写操作审计** — 所有写操作尝试（含被拒）记录在页面与日志文件，含状态/耗时/影响行数，可选用读审计
+- **执行错误入库** — 打到数据库的执行失败记入 `logs/error_log.db` 的 `mcp_error_log` 表（含别名、工具、SQL、数据库报错），管理页面可查可筛选；UPDATE/DELETE 无权限与确认拦截不入库，默认保留 90 天
+- **查询防护** — SELECT 结果默认截断到 500 行、语句默认 60 秒超时，防止大查询拖垮服务
+- **连接池** — MySQL 连接按配置指纹复用（默认池 3，可按别名配置/禁用）
+- **SSH 隧道常驻** — 按条目复用隧道、本地端口自动分配，管理页测试连接同样走隧道
+- **search_schema 工具** — 按关键字搜索表名/列名/注释，大库定位表不用全量拉 schema
+- **Streamable HTTP** — 新增 `POST /mcp?alias=别名` 无状态传输，兼容不支持 SSE 的客户端
 - **达梦 DM8 支持** — 与 MySQL 并存，一个服务端可同时管理 MySQL 与达梦库（需安装 dmPython 驱动）
 - **Linux 单文件部署** — 打包为不依赖 glibc 版本的静态可执行文件 + 启停脚本
 
@@ -27,6 +35,18 @@ MCP_TRANSPORT=sse MCP_SSE_PORT=8000 python -m mysql_mcp_server
 
 启动后打开管理页面：<http://127.0.0.1:8000/admin/>
 
+## MCP Bundle 安装包（.mcpb）
+
+一键打包为可导入 MCP 客户端（如 Claude Desktop）的安装包：
+
+```bash
+bash scripts/build_mcpb.sh
+```
+
+产物为 `dist/mysql-mcp-server.mcpb`（约 120KB 源码包，`uv` 类型：依赖由客户端安装，跨平台）。安装时在界面填写 MySQL 主机、端口、用户名、密码、数据库名（可空，即多库模式）与删除开关即可，无需手写 JSON 配置。包内为 stdio 单库模式（读/写同一账号，走环境变量兼容配置）；如需别名多库、SSE 管理页、达梦支持，请用源码/SSE 方式部署。
+
+> 说明：仓库根目录遗留的旧 `mysql-mcp-server.mcpb` 为上游 v0.3.1 产物，已过时，请使用新打包的 `dist/` 产物。
+
 ## 管理页面
 
 ![管理页面总览](docs/images/admin-overview.png)
@@ -40,6 +60,8 @@ MCP_TRANSPORT=sse MCP_SSE_PORT=8000 python -m mysql_mcp_server
 | 写操作审计 | 最近 100 条写操作记录（时间、别名、SQL 类型、确认通道、状态、SQL 摘要），可刷新 |
 
 > **局域网访问**：管理页面默认仅限本机（回环）访问。设置环境变量 `ADMIN_TOKEN` 后，局域网客户端需在页面输入该令牌（或请求带 `X-Admin-Token` 头）才能访问。
+
+> **测试连接**：先验证实例连通与账号认证，再校验配置的数据库名（达梦为模式名）是否存在且对账号可见；数据库名留空的多库模式跳过库名校验。
 
 ## 数据库配置项
 
@@ -107,7 +129,7 @@ pip install dmPython
 
 - 达梦默认端口 **5236**（表单留空端口时自动使用）；“数据库名”对应达梦的**模式名（schema）**，留空则进入多模式模式（列出可访问模式，过滤 SYS 等系统用户）
 - 元数据查询走达梦数据字典：表列表 `USER_TABLES` / `ALL_TABLES`，列信息 `ALL_TAB_COLUMNS`（可空性 `Y/N` 自动对齐为 `YES/NO`），标识符使用双引号引用
-- `execute_sql`、`get_schema_info`、`get_table_sample` 三个工具行为与 MySQL 一致（含三级判定、双通道确认、审计）；`alias` 参数同样支持别名与项目名称两种匹配
+- `execute_sql`、`get_schema_info`、`get_table_sample`、`search_schema` 四个工具行为与 MySQL 一致（含三级判定、双通道确认、审计）；`alias` 参数同样支持别名与项目名称两种匹配
 - 未安装 dmPython 时连接达梦条目会返回明确的安装提示，不影响 MySQL 条目正常使用
 - 单文件打包（`build_remote.sh`）已包含 `--collect-all dmPython`，无需额外处理驱动动态库
 
@@ -119,6 +141,14 @@ pip install dmPython
 - 磁盘文件 `logs/audit.log` 追加写入，格式：`时间 | 别名 | SQL类型 | 确认通道 | 状态 | SQL`
 
 确认通道取值：`elicitation`（弹窗确认）、`token`（令牌确认）、`skip_confirm`（免确认执行）、`-`（未进入确认环节）；状态包含 `executed`、`pending_token`、`token_too_early`、`invalid_token`、`user_decline`、`rejected_delete_disabled`、`blocked_policy` 等。
+
+## 执行错误日志
+
+凡是真正发往数据库并返回错误的调用（`execute_sql`、`get_schema_info`、`get_table_sample`、资源列表/读取）都会入库：
+
+- 存储：本机 SQLite `logs/error_log.db` 的 `mcp_error_log` 表（`id / time / alias / tool / sql_type / role / sql / db_error`，SQL 与错误信息各截断 2000 字符），目标库不可用也不影响记录；另有内存最近 100 条与 `logs/error_log_fallback.log` 兜底
+- 排除：确认流程拦截（未开启删除权限、令牌无效/过期/冷静期、用户拒绝、`elicitation_only`）在执行前即返回，不会入库；数据库返回的 UPDATE/DELETE 无权限错误（`command denied`）同样不入库
+- 查看：管理页面「执行错误日志」表格，或 `GET /admin/api/errors?limit=100&alias=别名`（最新在前）
 
 ## Linux 打包部署
 
@@ -145,3 +175,5 @@ bash scripts/build_remote.sh
 ```
 
 > 说明：若目标机器 glibc 版本与构建机一致或更新，也可用 `scripts/build.sh`（仅 PyInstaller、不做 staticx）产出体积更小的普通单文件。
+>
+> 认证兼容：单文件部署下 MySQL 连接默认使用纯 Python 实现（`use_pure=True`），以避开 mysql-connector 26.7+ C 扩展在冻结环境中找不到自带认证插件（`mysql_native_password` 等）的问题；如需强制 C 扩展，设置环境变量 `MYSQL_USE_PURE=false`。

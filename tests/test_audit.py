@@ -22,11 +22,30 @@ def test_record_and_list():
     assert e["time"]  # 非空时间戳
 
 
-def test_cap_100():
-    for i in range(150):
+def test_cap_200():
+    for i in range(250):
         audit.record("db1", "UPDATE", "client", f"UPDATE t SET x={i}")
-    assert len(audit.list_entries()) == 100
-    assert audit.list_entries()[-1]["sql"] == "UPDATE t SET x=149"
+    assert len(audit.list_entries()) == 200
+    assert audit.list_entries()[-1]["sql"] == "UPDATE t SET x=249"
+
+
+def test_record_fields_elapsed_rows():
+    e = audit.record("db1", "UPDATE", "token", "UPDATE t SET x=1",
+                     status="error", elapsed_ms=123, rows=None)
+    assert e["status"] == "error"
+    assert e["elapsed_ms"] == 123
+    assert e["rows"] is None
+    e2 = audit.record("db1", "INSERT", "skip_confirm", "INSERT INTO t VALUES (1)",
+                      elapsed_ms=5, rows=1)
+    assert e2["rows"] == 1
+
+
+def test_file_rotation(tmp_path, monkeypatch):
+    monkeypatch.setattr(audit, "MAX_FILE_BYTES", 200)
+    for i in range(20):
+        audit.record("db1", "UPDATE", "client", f"UPDATE t SET x={i} where pad-padding-pad")
+    assert (tmp_path / "audit.log.1").exists()  # 第一代轮转文件已生成
+    assert (tmp_path / "audit.log").exists()
 
 
 def test_sql_truncated_to_200():

@@ -1,5 +1,5 @@
 import pytest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from mcp.types import TextContent
 
@@ -42,15 +42,24 @@ async def test_delete_not_affected_by_skip_confirm():
 
 @pytest.mark.asyncio
 async def test_ddl_allowed_with_confirm(tmp_path, monkeypatch):
-    """问题3：确认后允许 DDL（改表结构/建表）——ALTER/CREATE 走正常确认后执行。"""
+    """DDL 权限开启时：ALTER/CREATE 走正常确认后执行。"""
     ok = TextContent(type="text", text="done")
     with patch("mysql_mcp_server.server.elicit_confirm", new=AsyncMock(return_value="accept")), \
          patch("mysql_mcp_server.server.run_query_entry", new=AsyncMock(return_value=[ok])) as rq:
-        r1 = await execute_sql_entry("db1", make_entry(), "ALTER TABLE t ADD COLUMN c INT")
-        r2 = await execute_sql_entry("db1", make_entry(), "CREATE TABLE t2 (id INT)")
+        r1 = await execute_sql_entry("db1", make_entry(allow_ddl=True), "ALTER TABLE t ADD COLUMN c INT")
+        r2 = await execute_sql_entry("db1", make_entry(allow_ddl=True), "CREATE TABLE t2 (id INT)")
     assert text_of(r1) == "done"
     assert text_of(r2) == "done"
     assert rq.await_args_list[0].args[2] == "write"
+
+
+@pytest.mark.asyncio
+async def test_ddl_blocked_without_allow_ddl():
+    """allow_ddl 默认关闭：CREATE/ALTER 等 DDL 被拒绝（行为变化：不再仅靠确认放行）。"""
+    with patch("mysql_mcp_server.server.elicit_confirm", new=AsyncMock()) as ec:
+        result = await execute_sql_entry("db1", make_entry(), "ALTER TABLE t ADD COLUMN c INT")
+    assert "DDL" in text_of(result)
+    ec.assert_not_awaited()
 
 
 class TestBuildConnectorConfig:
@@ -292,15 +301,27 @@ async def test_cancel_rejected():
 
 @pytest.mark.asyncio
 async def test_cte_delete_audit_type(tmp_path, monkeypatch):
+    """CTE 内含 SELECT 的 DELETE：审计 type 应记 DELETE 而非 WITH（真实执行路径）。"""
     from mysql_mcp_server import audit as audit_mod
+    from mysql_mcp_server.server import conn_pool
+
     monkeypatch.setattr(audit_mod, "LOG_DIR", tmp_path)
     audit_mod.clear()
-    ok = TextContent(type="text", text="done")
+    cur = MagicMock()
+    cur.description = None  # DELETE 无结果集
+    cur.rowcount = 1
+    cur.__enter__.return_value = cur
+    conn = MagicMock()
+    conn.__enter__.return_value = conn
+    conn.cursor.return_value = cur
     with patch("mysql_mcp_server.server.elicit_confirm", new=AsyncMock(return_value="accept")), \
-         patch("mysql_mcp_server.server.run_query_entry", new=AsyncMock(return_value=[ok])):
+         patch.object(conn_pool, "get_connection", return_value=conn):
         await execute_sql_entry("db1", make_entry(allow_delete=True),
                                 "WITH c AS (SELECT 1) DELETE FROM t")
-    assert audit_mod.list_entries()[-1]["type"] == "DELETE"  # 不应是 WITH
+    entries = audit_mod.list_entries()
+    assert entries and entries[-1]["type"] == "DELETE"  # 不应是 WITH
+    assert entries[-1]["status"] == "executed"
+    assert entries[-1]["rows"] == 1
 
 
 class TestCallToolImpl:
@@ -420,3 +441,125 @@ class TestBuildAllowedHosts:
         from mysql_mcp_server.server import _build_allowed_hosts
         hosts = _build_allowed_hosts("192.168.84.22", 9000)
         assert "192.168.84.22:9000" in hosts
+
+
+@pytest.mark.asyncio
+async def test_read_db_error_recorded_to_error_log(tmp_path, monkeypatch):
+    """读 SQL 打到数据库报错 → error_log 入库（含别名/工具/SQL/数据库错误）。"""
+    from mysql_mcp_server import error_log, server
+    from mysql_mcp_server.db_drivers import error_message
+    monkeypatch.setattr(error_log, "DB_FILE", tmp_path / "error_log.db")
+    monkeypatch.setattr(error_log, "FALLBACK_FILE", tmp_path / "error_log_fallback.log")
+    error_log.clear()
+    boom = Exception("no such table")
+    with patch("mysql_mcp_server.server.conn_pool.get_connection", side_effect=boom):
+        result = await execute_sql_entry("db1", make_entry(), "SELECT * FROM missing_table")
+    assert "Error executing query" in text_of(result)
+    rows = error_log.query_errors()
+    assert len(rows) == 1
+    assert rows[0]["alias"] == "db1"
+    assert rows[0]["tool"] == "execute_sql"
+    assert "missing_table" in rows[0]["sql"]
+    assert rows[0]["db_error"] == error_message(make_entry(), boom)
+
+
+@pytest.mark.asyncio
+async def test_write_db_error_recorded_with_confirm(tmp_path, monkeypatch):
+    """确认通过的写 SQL 执行报错 → 同样入库。"""
+    from mysql_mcp_server import error_log
+    monkeypatch.setattr(error_log, "DB_FILE", tmp_path / "error_log.db")
+    monkeypatch.setattr(error_log, "FALLBACK_FILE", tmp_path / "error_log_fallback.log")
+    error_log.clear()
+    with patch("mysql_mcp_server.server.elicit_confirm", new=AsyncMock(return_value="accept")), \
+         patch("mysql_mcp_server.server.conn_pool.get_connection",
+               side_effect=Exception("Duplicate entry '1' for key 'PRIMARY'")):
+        result = await execute_sql_entry("db1", make_entry(), "INSERT INTO t VALUES (1)")
+    assert "Error executing query" in text_of(result)
+    rows = error_log.query_errors()
+    assert len(rows) == 1
+    assert "Duplicate entry" in rows[0]["db_error"]
+
+
+@pytest.mark.asyncio
+async def test_permission_denied_not_recorded(tmp_path, monkeypatch):
+    """数据库返回 UPDATE 无权限 → 不入库。"""
+    from mysql_mcp_server import error_log
+    monkeypatch.setattr(error_log, "DB_FILE", tmp_path / "error_log.db")
+    monkeypatch.setattr(error_log, "FALLBACK_FILE", tmp_path / "error_log_fallback.log")
+    error_log.clear()
+    with patch("mysql_mcp_server.server.elicit_confirm", new=AsyncMock(return_value="accept")), \
+         patch("mysql_mcp_server.server.conn_pool.get_connection",
+               side_effect=Exception("UPDATE command denied to user 'w'@'%' for table 't'")):
+        result = await execute_sql_entry("db1", make_entry(), "UPDATE t SET x=1")
+    assert "command denied" in text_of(result)
+    assert error_log.query_errors() == []
+
+
+@pytest.mark.asyncio
+async def test_coerce_arguments_json_string():
+    """arguments 发成 JSON 字符串 → 正常解析执行（兼容非标准客户端）。"""
+    from mysql_mcp_server.server import call_tool_impl
+    from mysql_mcp_server import db_config
+    import tempfile, os
+    tmp = tempfile.mkdtemp()
+    old_file, old_dir = db_config.CONFIG_FILE, db_config.CONFIG_DIR
+    db_config.CONFIG_FILE = type(old_file)(os.path.join(tmp, "databases.json"))
+    db_config.CONFIG_DIR = type(old_dir)(tmp)
+    db_config.reset_cache()
+    try:
+        db_config.save_config({"default_alias": "db1", "databases": {"db1": make_entry()}})
+        ok = TextContent(type="text", text="ok")
+        with patch("mysql_mcp_server.server.run_query_entry", new=AsyncMock(return_value=[ok])):
+            r = await call_tool_impl("execute_sql", {"query": "SELECT 1", "extra": "x"})
+        assert text_of(r) == "ok"
+    finally:
+        db_config.CONFIG_FILE, db_config.CONFIG_DIR = old_file, old_dir
+        db_config.reset_cache()
+
+
+@pytest.mark.asyncio
+async def test_coerce_limit_string_and_invalid():
+    """get_table_sample 的 limit 传字符串数字 → 转 int 执行；非法字符串 → 中文提示。"""
+    from mysql_mcp_server.server import _coerce_arguments
+    args, err = _coerce_arguments("get_table_sample", {"table_name": "t", "limit": "5"})
+    assert err == "" and args["limit"] == 5
+    args, err = _coerce_arguments("get_table_sample", {"table_name": "t", "limit": "abc"})
+    assert "整数" in err
+    args, err = _coerce_arguments("execute_sql", '{"query": "SELECT 1"}')
+    assert err == "" and args == {"query": "SELECT 1"}
+    _, err = _coerce_arguments("execute_sql", "not-json")
+    assert "JSON 对象" in err
+    _, err = _coerce_arguments("execute_sql", ["x"])
+    assert "JSON 对象" in err
+
+
+@pytest.mark.asyncio
+async def test_missing_table_name_friendly():
+    """get_table_sample 缺 table_name → 中文提示而非内部错误。"""
+    with patch("mysql_mcp_server.server.run_query_entry", new=AsyncMock()) as rq:
+        result = await execute_sql_entry("db1", make_entry(), "SELECT 1")
+        assert rq.await_count == 1  # 对照：正常调用不受影响
+    from mysql_mcp_server.server import call_tool_impl, db_config
+    import tempfile, os
+    tmp = tempfile.mkdtemp()
+    old_file, old_dir = db_config.CONFIG_FILE, db_config.CONFIG_DIR
+    db_config.CONFIG_FILE = type(old_file)(os.path.join(tmp, "databases.json"))
+    db_config.CONFIG_DIR = type(old_dir)(tmp)
+    db_config.reset_cache()
+    try:
+        db_config.save_config({"default_alias": "db1", "databases": {"db1": make_entry()}})
+        with patch("mysql_mcp_server.server.run_query_entry", new=AsyncMock()) as rq:
+            r = await call_tool_impl("get_table_sample", {}, alias="db1")
+        assert "table_name" in text_of(r)
+        rq.assert_not_awaited()
+    finally:
+        db_config.CONFIG_FILE, db_config.CONFIG_DIR = old_file, old_dir
+        db_config.reset_cache()
+
+
+def test_parse_table_arg_none():
+    """parse_table_arg(None) → 中文 ValueError。"""
+    from mysql_mcp_server.server import parse_table_arg
+    import pytest as _pytest
+    with _pytest.raises(ValueError, match="table_name"):
+        parse_table_arg(None)

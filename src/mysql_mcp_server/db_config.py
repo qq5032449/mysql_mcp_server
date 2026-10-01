@@ -43,7 +43,17 @@ def _env_entry() -> dict | None:
         "write_user": {"user": user, "password": password},
         "write_policy": "client_confirm",
         "allow_delete": os.getenv("MYSQL_ALLOW_DELETE", "false").lower() == "true",
+        "allow_ddl": False,
+        "query_timeout": _env_int("MYSQL_MCP_QUERY_TIMEOUT", 60),
+        "pool_size": _env_int("MYSQL_MCP_POOL_SIZE", 3),
     }
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, ""))
+    except (TypeError, ValueError):
+        return default
 
 
 def load_config() -> dict:
@@ -150,6 +160,15 @@ def normalize_entry(entry: dict) -> dict:
             return out
         raise ValueError("projects 必须是字符串或字符串列表")
 
+    def _nonneg_int(value, label: str) -> int:
+        try:
+            n = int(value)
+        except (TypeError, ValueError):
+            raise ValueError(f"{label} 必须是整数") from None
+        if n < 0:
+            raise ValueError(f"{label} 不能为负数")
+        return n
+
     ssh = entry.get("ssh") or {}
     db_type = str(entry.get("db_type", "mysql") or "mysql").strip().lower()
     if db_type not in _VALID_DB_TYPES:
@@ -162,10 +181,13 @@ def normalize_entry(entry: dict) -> dict:
         "charset": entry.get("charset") or "utf8mb4",
         "sql_mode": entry.get("sql_mode") or "TRADITIONAL",
         "connect_timeout": int(entry.get("connect_timeout", 10)),
+        "query_timeout": _nonneg_int(entry.get("query_timeout", 60), "query_timeout"),
+        "pool_size": _nonneg_int(entry.get("pool_size", 3), "pool_size"),
         "read_user": _acct("read_user"),
         "write_user": _acct("write_user"),
         "write_policy": entry.get("write_policy", "client_confirm"),
         "allow_delete": bool(entry.get("allow_delete", False)),
+        "allow_ddl": bool(entry.get("allow_ddl", False)),
         "skip_confirm": bool(entry.get("skip_confirm", False)),
         "projects": _projects(entry.get("projects")),
         "ssh": {

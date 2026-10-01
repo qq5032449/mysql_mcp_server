@@ -18,7 +18,7 @@ def _env_config(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-@patch("mysql_mcp_server.db_drivers.connect_entry")
+@patch("mysql_mcp_server.server.conn_pool.get_connection")
 async def test_call_tool_describe_formatting(mock_connect):
     """Test that DESCRIBE queries are formatted correctly with NULL handling."""
     # Mock cursor behavior
@@ -30,6 +30,7 @@ async def test_call_tool_describe_formatting(mock_connect):
         ("name", "varchar", "YES"),
         ("extra", "text", None) # Test NULL handling
     ]
+    mock_cursor.fetchmany.return_value = mock_cursor.fetchall.return_value
     
     mock_conn = MagicMock()
     mock_conn.__enter__.return_value = mock_conn
@@ -48,12 +49,13 @@ async def test_call_tool_describe_formatting(mock_connect):
     assert lines[3] == "extra,text,NULL" # NULL should be converted to string "NULL"
 
 @pytest.mark.asyncio
-@patch("mysql_mcp_server.db_drivers.connect_entry")
+@patch("mysql_mcp_server.server.conn_pool.get_connection")
 async def test_call_tool_empty_results(mock_connect):
     """Test handling of queries that return no results."""
     mock_cursor = MagicMock()
     mock_cursor.description = [("id",)]
     mock_cursor.fetchall.return_value = []
+    mock_cursor.fetchmany.return_value = []
     
     mock_conn = MagicMock()
     mock_conn.__enter__.return_value = mock_conn
@@ -66,13 +68,14 @@ async def test_call_tool_empty_results(mock_connect):
     assert "No results returned" in response[0].text
 
 @pytest.mark.asyncio
-@patch("mysql_mcp_server.db_drivers.connect_entry")
+@patch("mysql_mcp_server.server.conn_pool.get_connection")
 async def test_call_tool_show_tables(mock_connect, monkeypatch):
     """Test SHOW TABLES formatting."""
     monkeypatch.setenv("MYSQL_DATABASE", "test_db")
 
     mock_cursor = MagicMock()
     mock_cursor.fetchall.return_value = [("users",), ("orders",)]
+    mock_cursor.fetchmany.return_value = [("users",), ("orders",)]
     
     mock_conn = MagicMock()
     mock_conn.__enter__.return_value = mock_conn
@@ -87,7 +90,7 @@ async def test_call_tool_show_tables(mock_connect, monkeypatch):
     assert "orders" in response[0].text
 
 @pytest.mark.asyncio
-@patch("mysql_mcp_server.db_drivers.connect_entry")
+@patch("mysql_mcp_server.server.conn_pool.get_connection")
 async def test_list_resources_identifier_safe(mock_connect, monkeypatch):
     """Test that resources have identifier-safe names for strict LLMs (Issue #39)."""
     from mysql_mcp_server.server import list_resources
@@ -96,6 +99,7 @@ async def test_list_resources_identifier_safe(mock_connect, monkeypatch):
     monkeypatch.setenv("MYSQL_DATABASE", "test_db")
     mock_cursor = MagicMock()
     mock_cursor.fetchall.return_value = [("users",), ("products",)]
+    mock_cursor.fetchmany.return_value = [("users",), ("products",)]
     
     mock_conn = MagicMock()
     mock_conn.__enter__.return_value = mock_conn
@@ -111,7 +115,7 @@ async def test_list_resources_identifier_safe(mock_connect, monkeypatch):
     assert str(resources[0].uri) == "mysql://users/data"
 
 @pytest.mark.asyncio
-@patch("mysql_mcp_server.db_drivers.connect_entry")
+@patch("mysql_mcp_server.server.conn_pool.get_connection")
 async def test_list_resources_multi_db_safe(mock_connect, monkeypatch):
     """Test that database resources have identifier-safe names."""
     from mysql_mcp_server.server import list_resources
@@ -120,6 +124,7 @@ async def test_list_resources_multi_db_safe(mock_connect, monkeypatch):
     monkeypatch.delenv("MYSQL_DATABASE", raising=False)
     mock_cursor = MagicMock()
     mock_cursor.fetchall.return_value = [("db1",), ("db2",), ("information_schema",)]
+    mock_cursor.fetchmany.return_value = [("db1",), ("db2",), ("information_schema",)]
     
     mock_conn = MagicMock()
     mock_conn.__enter__.return_value = mock_conn

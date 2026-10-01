@@ -28,3 +28,11 @@ pypi_publishing_notes.md
 # Runtime secrets & artifacts
 config/
 logs/
+# 本机构建产物与工具目录
+dist-win/
+dist-linux/
+*.mcpb
+.mimosa/
+
+# mcpb/ 目录只跟踪 manifest.json（server.py 为打包时生成的副本）
+mcpb/server.py

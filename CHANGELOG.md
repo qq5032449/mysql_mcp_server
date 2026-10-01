@@ -5,10 +5,57 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.5.0] - 2026-10-01
 
 ### Added
+- **Streamable HTTP 传输：**新增 `POST /mcp?alias=xxx`（stateless + JSON 响应），无需 SSE 会话握手，供支持新协议的客户端使用；SSE 保持不变。每别名惰性启动会话管理器，与 SSE 共用别名路由与工具实现。
+- **`search_schema` 工具：**按关键字搜索表名/列名/注释（`information_schema` / 达梦数据字典），大库上定位表远比全量拉取 schema 省时省 token；`limit` 默认 20、上限 50，LIKE 通配符已转义。
+- **SELECT 行数上限：**结果集默认最多返回 500 行（`MYSQL_MCP_MAX_ROWS`，0 不限），超限附中文截断提示，SHOW TABLES 同样受限——防止 AI 跑无 LIMIT 的大查询打爆上下文。
+- **语句超时：**MySQL 连接默认 60 秒 socket 读写超时（每别名 `query_timeout` 或 `MYSQL_MCP_QUERY_TIMEOUT`，0 不限），慢查询不再占死 worker 线程。
+- **MySQL 连接池：**按连接配置指纹（含账号/密码/库名）复用连接，默认池大小 3（每别名 `pool_size` 或 `MYSQL_MCP_POOL_SIZE`，0 禁用）；池耗尽自动降级直连，达梦仍走直连。
+- **SSH 隧道常驻化：**隧道按 ssh 配置指纹复用、本地端口自动分配（`local_port` 字段保留但不再使用），就绪探测替代 `sleep(2)`；管理页「测试连接」也走隧道（此前会绕过隧道直连，属修复）。
+- **DDL 权限开关 `allow_ddl`（行为变化）：**CREATE/ALTER/RENAME/GRANT/REVOKE 现在需要别名开启「允许 DDL」才可执行（默认关）；DELETE/TRUNCATE/DROP 仍由 `allow_delete` 管控，行为不变。旧配置升级后 DDL 默认被拒，需在管理页面按需开启。
+- **全表写警告：**UPDATE/DELETE 顶层无 WHERE 时，确认文案（弹窗与令牌消息）附加「将影响全表所有行」警示。
+- **配置导出/导入：**`GET /api/databases/export`（含密码，令牌/回环保护）与 `POST /api/databases/import`（整份校验后原子替换），管理页面新增导出/导入按钮，支持备份迁移。
+- **一键体检：**管理页面「一键体检」并发测试全部别名的读账号连通性并汇总结果。
+- **错误日志筛选：**`GET /api/errors` 的 `alias`/`limit` 参数接入管理页面（别名过滤 + 50/100/500 条）。
+- **审计增强：**审计记录新增执行状态（executed/error）、耗时、影响行数；`MYSQL_MCP_AUDIT_READ=true` 可选记录读操作；audit.log 超 5MB 自动轮转（保留一代）。
+- **错误日志保留期：**`mcp_error_log` 每自然日惰性清理超过保留期的记录（默认 90 天，`MYSQL_MCP_ERROR_RETENTION_DAYS`，0 永久）。
+- **Dockerfile 重写：**面向多库 HTTP 模式（SSE/Streamable HTTP/admin），config/logs 卷、HEALTHCHECK、非 root；单库 stdio 仍可用 `MCP_TRANSPORT=stdio`。
+
+### Fixed
+- **多语句误判：**`INSERT ... VALUES ('a;b')` 等字符串字面量/注释中的分号不再被误判为多语句（引号感知的顶层分号扫描替代朴素 `";" in query`）。
+- **Windows zip 产物名：**`windos-amd64.zip` 更名为 `windows-amd64.zip`。
+
+### Changed
+- 审计内存上限 100 → 200 条；审计文件行新增耗时与行数两列。
+
+## [0.4.8] - 2026-09-21
+
+### Fixed
+- **单文件部署认证插件报错：**`mysql-connector` 26.7+ 的 C 扩展按 `_mysql_connector.__file__` 相对路径查找自带认证插件（`mysql/vendor/plugin/*.so`），PyInstaller 单文件冻结后该路径不存在，回退到的系统 `/usr/lib/mysql/plugin` 通常也不存在，`mysql_native_password` 认证报 “Authentication plugin cannot be loaded”。现在 MySQL 连接默认强制纯 Python 实现（`use_pure=True`，插件模块随 `--collect-all mysql` 一并打包）；设置 `MYSQL_USE_PURE=false` 可恢复 C 扩展。管理页「测试连接」同步复用该配置（并保持不带库名探测）。
+
+## [0.4.7] - 2026-09-11
+
+### Added
+- **测试连接校验库/模式存在性：**管理页面「测试连接」现在会在验证实例连通与账号认证之后，进一步校验配置的数据库名（达梦为模式名）是否存在且对账号可见，错误信息可区分「实例/账号不通」与「库不存在或无权访问」。多数据库模式（库名留空）跳过该校验。
+
+## [0.4.6] - 2026-09-11
+
+### Fixed
+- **未初始化会话容错：**部分客户端（如 TRAE）SSE 重连后不在新会话上重走 `initialize` 握手直接发请求，SDK 以"未完成初始化"拒绝，客户端表现为 `Invalid request parameters`。现对跳过握手的会话自动补初始化并放行（记录 WARNING 日志）。安全性不受影响：此类会话无能力声明，写操作仍按 write_policy 降级走令牌二次确认，删除类仍受 allow_delete 约束。
+
+## [0.4.5] - 2026-09-11
+
+### Added
+- **执行错误入库：**新增 `mcp_error_log` 表（本机 SQLite `logs/error_log.db`），记录真正打到数据库的执行失败（含别名、工具名、SQL、数据库返回错误）。确认流程拦截与 UPDATE/DELETE 无权限错误（`command denied`）不入库。管理页面新增「执行错误日志」表格与 `GET /admin/api/errors` 查询接口。
 - **Dameng DM8 Support:** each database entry now carries a `db_type` (`mysql`/`dameng`, defaults to `mysql` so existing configs migrate with zero changes). Dameng entries connect via `dmPython` (optional `dameng` extra: `pip install "mysql_mcp_server[dameng]"`), with DM-dialect metadata queries (`USER_TABLES`/`ALL_TABLES`/`ALL_TAB_COLUMNS`), double-quote identifiers, default port 5236, and `database` mapped to schema. All three tools, confirmation flow, audit, and alias/project matching work identically across both types. Admin UI gains a database-type selector. Single-file build (`build_remote.sh`) collects dmPython runtime libraries.
+- **MCP Bundle 打包：**新增 `mcpb/manifest.json`（`uv` 类型，manifest 0.4）与 `scripts/build_mcpb.sh` 一键打包脚本，产物 `dist/mysql-mcp-server.mcpb` 可导入 MCP 客户端安装（stdio 单库模式，安装界面配置连接信息）。
+
+### Fixed
+- **工具调用参数兼容：**关闭 SDK 的 jsonschema 预校验（`validate_input=False`），部分客户端把 `arguments` 发成 JSON 字符串、`limit` 发成字符串时不再报 `Invalid request parameters`/`Input validation error`，改为服务端宽松兼容并返回中文提示；`get_table_sample` 缺 `table_name` 时返回中文指引而非内部错误。
+
+## [Unreleased]
 
 ## [0.4.4] - 2026-07-30
 

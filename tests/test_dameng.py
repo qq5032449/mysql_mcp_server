@@ -230,6 +230,7 @@ class TestDamengEndToEnd:
         cur = MagicMock()
         cur.description = [(c,) for c in columns]
         cur.fetchall.return_value = list(rows)
+        cur.fetchmany.return_value = list(rows)
         cur.__enter__.return_value = cur
         conn = MagicMock()
         conn.__enter__.return_value = conn
@@ -288,9 +289,35 @@ class TestDamengEndToEnd:
             calls["my"] = entry
             return conn_my
 
-        with patch("mysql_mcp_server.db_drivers.connect_entry", side_effect=_fake_connect):
+        # MySQL 分支走连接池，直接 patch 池入口才能同时覆盖两种 db_type
+        with patch("mysql_mcp_server.server.conn_pool.get_connection", side_effect=_fake_connect):
             await call_tool_impl("get_table_sample", {"table_name": "EMP", "alias": "dm1"})
             await call_tool_impl("get_table_sample", {"table_name": "t", "alias": "my1"})
         assert cur_dm.execute.call_args.args[0] == 'SELECT * FROM "EMP" LIMIT 5'
         assert cur_my.execute.call_args.args[0] == "SELECT * FROM `t` LIMIT 5"
         assert calls["dm"] is not None and calls["my"] is not None
+
+
+class TestMysqlUsePure:
+    """use_pure 默认 True：绕开 C 扩展在冻结环境的认证插件路径问题。"""
+
+    def test_default_true(self, monkeypatch):
+        monkeypatch.delenv("MYSQL_USE_PURE", raising=False)
+        assert db_drivers.mysql_use_pure() is True
+        cfg = db_drivers.build_config(mysql_entry(), "read")
+        assert cfg["use_pure"] is True
+
+    def test_env_false_restores_cext(self, monkeypatch):
+        monkeypatch.setenv("MYSQL_USE_PURE", "false")
+        assert db_drivers.mysql_use_pure() is False
+        assert db_drivers.build_config(mysql_entry(), "read")["use_pure"] is False
+
+    def test_env_true_case_insensitive(self, monkeypatch):
+        monkeypatch.setenv("MYSQL_USE_PURE", "FALSE")
+        assert db_drivers.mysql_use_pure() is False
+        monkeypatch.setenv("MYSQL_USE_PURE", "true")
+        assert db_drivers.mysql_use_pure() is True
+
+    def test_dameng_unaffected(self, monkeypatch):
+        monkeypatch.delenv("MYSQL_USE_PURE", raising=False)
+        assert "use_pure" not in db_drivers.build_config(dm_entry(), "read")

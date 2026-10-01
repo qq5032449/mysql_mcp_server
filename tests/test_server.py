@@ -14,10 +14,11 @@ def test_server_initialization():
 async def test_list_tools():
     """Test that list_tools returns expected tools."""
     tools = await list_tools()
-    assert len(tools) == 3
+    assert len(tools) == 4
     assert any(t.name == "execute_sql" for t in tools)
     assert any(t.name == "get_schema_info" for t in tools)
     assert any(t.name == "get_table_sample" for t in tools)
+    assert any(t.name == "search_schema" for t in tools)
 
 
 @pytest.mark.asyncio
@@ -130,7 +131,7 @@ async def test_get_schema_info_cross_database(monkeypatch, tmp_path):
 
     captured = {}
 
-    async def fake_run_query_entry(entry, query, role):
+    async def fake_run_query_entry(entry, query, role, **kwargs):
         captured["query"] = query
         captured["role"] = role
         return []
@@ -157,7 +158,7 @@ async def test_get_table_sample_cross_database(monkeypatch, tmp_path):
 
     captured = {}
 
-    async def fake_run_query_entry(entry, query, role):
+    async def fake_run_query_entry(entry, query, role, **kwargs):
         captured["query"] = query
         captured["role"] = role
         return []

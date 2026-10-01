@@ -1,3 +1,6 @@
+import sys
+import types
+
 import pytest
 from unittest.mock import patch, MagicMock
 from starlette.testclient import TestClient
@@ -243,10 +246,19 @@ class TestSettings:
 
 
 class TestConnection:
+    @staticmethod
+    def _fake_conn(schema_row):
+        """假连接：cursor().fetchone() 返回 schema_row（None 表示库不存在）。"""
+        conn = MagicMock()
+        cur = MagicMock()
+        cur.fetchone.return_value = schema_row
+        conn.cursor.return_value.__enter__.return_value = cur
+        return conn, cur
+
     def test_read_ok(self, client, no_env):
         client.post("/api/databases", json=payload())
         with patch("mysql.connector.connect") as m:
-            m.return_value = MagicMock()
+            m.return_value = self._fake_conn(("mydb",))[0]
             r = client.post("/api/databases/db1/test", json={})
         assert r.status_code == 200
         assert r.json() == {"ok": True}
@@ -254,10 +266,64 @@ class TestConnection:
         assert kwargs["user"] == "r"
         assert kwargs["password"] == "rp"
 
+    def test_database_not_exists_reported(self, client, no_env):
+        """库不存在/不可见 → ok False 且错误信息可区分（连接与认证正常）。"""
+        client.post("/api/databases", json=payload())
+        conn, cur = self._fake_conn(None)
+        with patch("mysql.connector.connect", return_value=conn):
+            r = client.post("/api/databases/db1/test", json={})
+        body = r.json()
+        assert body["ok"] is False
+        assert "不存在或当前账号无权访问" in body["error"]
+        assert "mydb" in body["error"]
+        sql = cur.execute.call_args.args[0]
+        assert "information_schema.SCHEMATA" in sql
+        assert cur.execute.call_args.args[1] == ("mydb",)
+
+    def test_multi_db_mode_skips_schema_check(self, client, no_env):
+        """数据库名留空（多库模式）→ 不做库名校验，仅验证连接与账号。"""
+        body = payload()
+        body["database"] = None
+        client.post("/api/databases", json=body)
+        conn, cur = self._fake_conn(None)
+        with patch("mysql.connector.connect", return_value=conn):
+            r = client.post("/api/databases/db1/test", json={})
+        assert r.json() == {"ok": True}
+        cur.execute.assert_not_called()
+
+    def test_uses_build_config_without_database(self, client, no_env):
+        """测试连接复用 build_config（含 use_pure），但不带库名（库存在性单独校验）。"""
+        client.post("/api/databases", json=payload())
+        with patch("mysql.connector.connect") as m:
+            m.return_value = self._fake_conn(("mydb",))[0]
+            client.post("/api/databases/db1/test", json={})
+        kw = m.call_args.kwargs
+        assert kw["use_pure"] is True
+        assert "database" not in kw
+        assert kw["connect_timeout"] == 5
+
+    def test_dameng_schema_not_exists_reported(self, client, no_env):
+        """达梦：模式不存在 → 同样给出可区分的提示。"""
+        fake = types.ModuleType("dmPython")
+        fake.Error = type("DmError", (Exception,), {})
+        conn, cur = self._fake_conn(None)
+        fake.connect = MagicMock(return_value=conn)
+        body = payload()
+        body["db_type"] = "dameng"
+        body["database"] = "DMHR"
+        client.post("/api/databases", json=body)
+        with patch.dict(sys.modules, {"dmPython": fake}):
+            r = client.post("/api/databases/db1/test", json={})
+        assert r.json()["ok"] is False
+        assert "模式（schema）'DMHR' 不存在或当前账号无权访问" in r.json()["error"]
+        assert "ALL_USERS" in cur.execute.call_args.args[0]
+        # 连接探测不应带 schema（否则驱动报错不明确）
+        assert "schema" not in fake.connect.call_args.kwargs
+
     def test_write_account(self, client, no_env):
         client.post("/api/databases", json=payload())
         with patch("mysql.connector.connect") as m:
-            m.return_value = MagicMock()
+            m.return_value = self._fake_conn(("mydb",))[0]
             r = client.post("/api/databases/db1/test", json={"as_write": True})
         assert r.status_code == 200
         assert m.call_args.kwargs["user"] == "w"
@@ -293,3 +359,79 @@ class TestAdminPage:
         r = client.get("/")
         assert r.status_code == 200
         assert "MySQL MCP 管理页面" in r.text
+
+
+class TestErrorsApi:
+    def test_errors_empty(self, client, no_env, tmp_path, monkeypatch):
+        from mysql_mcp_server import error_log
+        monkeypatch.setattr(error_log, "DB_FILE", tmp_path / "error_log.db")
+        monkeypatch.setattr(error_log, "FALLBACK_FILE", tmp_path / "error_log_fallback.log")
+        error_log.clear()
+        r = client.get("/api/errors")
+        assert r.status_code == 200
+        assert r.json() == []
+
+    def test_errors_listed_and_filtered(self, client, no_env, tmp_path, monkeypatch):
+        from mysql_mcp_server import error_log
+        monkeypatch.setattr(error_log, "DB_FILE", tmp_path / "error_log.db")
+        monkeypatch.setattr(error_log, "FALLBACK_FILE", tmp_path / "error_log_fallback.log")
+        error_log.clear()
+        error_log.record("db1", "execute_sql", "SELECT 1", "boom1")
+        error_log.record("db2", "execute_sql", "SELECT 2", "boom2")
+        r = client.get("/api/errors")
+        assert r.status_code == 200
+        assert [e["alias"] for e in r.json()] == ["db2", "db1"]
+        r = client.get("/api/errors?alias=db1")
+        assert [e["alias"] for e in r.json()] == ["db1"]
+
+    def test_errors_guarded_for_lan(self, app, no_env):
+        c = TestClient(app, client=("10.0.0.5", 50000))
+        assert c.get("/api/errors").status_code == 403
+
+
+class TestExportImport:
+    def test_export_contains_passwords(self, client, no_env):
+        r = client.post("/api/databases", json=payload())
+        assert r.status_code == 201
+        r = client.get("/api/databases/export")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["databases"]["db1"]["read_user"]["password"] == "rp"
+
+    def test_import_replaces_config(self, client, no_env):
+        client.post("/api/databases", json=payload())
+        imported = {
+            "default_alias": "db2",
+            "databases": {
+                "db2": {
+                    "alias": "db2", "host": "10.0.0.8", "port": 3307, "database": "other",
+                    "read_user": {"user": "r2", "password": "p2"},
+                    "write_user": {"user": "w2", "password": "p3"},
+                }
+            },
+        }
+        r = client.post("/api/databases/import", json=imported)
+        assert r.status_code == 200
+        assert r.json()["count"] == 1
+        cfg = client.get("/api/databases/export").json()
+        assert "db1" not in cfg["databases"]
+        assert cfg["default_alias"] == "db2"
+        assert cfg["databases"]["db2"]["host"] == "10.0.0.8"
+        assert cfg["databases"]["db2"]["allow_ddl"] is False  # 新字段有默认值
+
+    def test_import_rejects_invalid_entry(self, client, no_env):
+        bad = {"databases": {"x": {"host": "", "read_user": {}, "write_user": {}}}}
+        r = client.post("/api/databases/import", json=bad)
+        assert r.status_code == 400
+
+    def test_import_rejects_missing_databases(self, client, no_env):
+        assert client.post("/api/databases/import", json={}).status_code == 400
+
+    def test_import_rejects_bad_default(self, client, no_env):
+        r = client.post("/api/databases/import", json={
+            "default_alias": "nope", "databases": {"a": payload("a")}})
+        assert r.status_code == 400
+
+    def test_export_guarded_for_lan(self, app, no_env):
+        c = TestClient(app, client=("10.0.0.5", 50000))
+        assert c.get("/api/databases/export").status_code == 403

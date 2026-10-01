@@ -68,8 +68,14 @@
 <h1><span class="dot"></span>MySQL MCP 管理页面</h1>
 
 <div class="card">
-  <h2>数据库列表 <button class="btn primary" id="btnAdd">＋ 添加数据库</button></h2>
+  <h2>数据库列表
+    <button class="btn" id="btnHealthCheck">一键体检</button>
+    <button class="btn" id="btnExport">导出配置</button>
+    <button class="btn" id="btnImport">导入配置</button>
+    <button class="btn primary" id="btnAdd">＋ 添加数据库</button>
+  </h2>
   <div id="dbList"><p class="empty">加载中…</p></div>
+  <input type="file" id="importFile" accept=".json" style="display:none">
 </div>
 
 <div class="card">
@@ -78,17 +84,36 @@
   <p class="hint">
     点击上方地址即可复制。在 <b>TRAE</b> 中：MCP 市场 → 添加自定义服务器 → 类型选 SSE，URL 填上述地址。<br>
     在 <b>Claude Desktop</b> 中：编辑 claude_desktop_config.json，于 mcpServers 内配置
-    <span class="code">{"type":"sse","url":"http://127.0.0.1:8000/sse?alias=别名"}</span>。
+    <span class="code">{"type":"sse","url":"http://127.0.0.1:8000/sse?alias=别名"}</span>。<br>
+    支持新协议的客户端可选 <b>Streamable HTTP</b>（无状态，无需 SSE 会话）：
+    <span class="code">{"type":"streamable-http","url":"http://127.0.0.1:8000/mcp?alias=别名"}</span>
   </p>
 </div>
 
 <div class="card">
   <h2>写操作审计 <button class="btn" id="btnRefreshAudit">刷新</button></h2>
   <table>
-    <thead><tr><th>时间</th><th>别名</th><th>类型</th><th>确认通道</th><th>状态</th><th>SQL</th></tr></thead>
+    <thead><tr><th>时间</th><th>别名</th><th>类型</th><th>确认通道</th><th>状态</th><th>耗时</th><th>行数</th><th>SQL</th></tr></thead>
     <tbody id="auditBody"></tbody>
   </table>
   <p class="empty" id="auditEmpty">暂无写操作记录</p>
+</div>
+
+<div class="card">
+  <h2>执行错误日志
+    <input id="errAliasFilter" placeholder="按别名过滤（可空）" style="width:160px">
+    <select id="errLimit" style="width:90px">
+      <option value="50">50 条</option>
+      <option value="100" selected>100 条</option>
+      <option value="500">500 条</option>
+    </select>
+    <button class="btn" id="btnRefreshErrors">查询</button>
+  </h2>
+  <table>
+    <thead><tr><th>时间</th><th>别名</th><th>工具</th><th>类型</th><th>角色</th><th>SQL</th><th>数据库错误</th></tr></thead>
+    <tbody id="errorBody"></tbody>
+  </table>
+  <p class="empty" id="errorEmpty">暂无执行错误记录</p>
 </div>
 
 <div class="mask hidden" id="modalMask">
@@ -149,17 +174,23 @@
             <label class="inline"><input type="checkbox" id="f_allow_delete"> 允许删除操作</label>
             <span class="warn">⚠ 开启后写账号可执行 DELETE / TRUNCATE / DROP（改表字段、新建表、删除表），数据不可恢复，请谨慎！</span>
           </div>
+          <div>
+            <label class="inline"><input type="checkbox" id="f_allow_ddl"> 允许 DDL（改结构）</label>
+            <span class="warn">开启后写账号可执行 CREATE / ALTER / RENAME / GRANT / REVOKE（DROP/TRUNCATE 仍归删除权限管）</span>
+          </div>
         </div>
       </fieldset>
       <details id="detailsSsh">
-        <summary>高级：SSH 隧道（可选）</summary>
+        <summary>高级：SSH 隧道 / 超时与连接池（可选）</summary>
         <div class="grid">
           <div><label class="inline"><input type="checkbox" id="f_ssh_enable"> 启用 SSH 隧道</label></div>
           <div><label>SSH 主机</label><input id="f_ssh_host"></div>
           <div><label>SSH 端口</label><input id="f_ssh_port" placeholder="22"></div>
           <div><label>SSH 用户</label><input id="f_ssh_user"></div>
           <div><label>密钥路径</label><input id="f_ssh_key_path" placeholder="~/.ssh/id_rsa"></div>
-          <div><label>本地端口</label><input id="f_ssh_local_port" placeholder="3330"></div>
+          <div><span class="warn" style="color:var(--muted)">本地端口自动分配，无需配置</span></div>
+          <div><label>语句超时（秒，0 不限）</label><input id="f_query_timeout" placeholder="60"></div>
+          <div><label>连接池大小（0 禁用）</label><input id="f_pool_size" placeholder="3"></div>
         </div>
       </details>
     </form>
@@ -249,6 +280,7 @@ function renderDbs() {
           ? '<span class="badge default">默认</span>'
           : `<button class="btn" onclick="setDefault('${esc(a)}')">设为默认</button>`}
         ${d.allow_delete ? '<span class="badge danger">删除权限: 开 ⚠</span>' : ""}
+        ${d.allow_ddl ? '<span class="badge warn">DDL: 开</span>' : ""}
         ${d.skip_confirm ? '<span class="badge warn">写免确认: 开</span>' : ""}
         <span class="db-actions">
           <button class="btn" onclick="openModal('${esc(a)}')">编辑</button>
@@ -289,14 +321,37 @@ function copySse(el) {
 }
 
 /* ---------- 写操作审计 ---------- */
+function fmtMs(v) { return v === null || v === undefined ? "-" : v + "ms"; }
+function fmtRows(v) { return v === null || v === undefined ? "-" : String(v); }
+function statusBadge(s) {
+  const cls = s === "executed" ? "default" : (s.startsWith("rejected") || s === "error" ? "danger" : "warn");
+  return `<span class="badge ${cls}">${esc(s)}</span>`;
+}
 async function loadAudit() {
   const entries = await api("api/audit");
   const rows = [...entries].reverse();  // 最新在前
   $("auditEmpty").style.display = rows.length ? "none" : "";
   $("auditBody").innerHTML = rows.map(e => `<tr>
     <td>${esc(e.time)}</td><td>${esc(e.alias)}</td><td>${esc(e.type)}</td>
-    <td>${esc(e.channel)}</td><td>${esc(e.status)}</td>
+    <td>${esc(e.channel)}</td><td>${statusBadge(e.status)}</td>
+    <td>${fmtMs(e.elapsed_ms)}</td><td>${fmtRows(e.rows)}</td>
     <td class="sql" title="${esc(e.sql)}">${esc(e.sql)}</td>
+  </tr>`).join("");
+}
+
+/* ---------- 执行错误日志 ---------- */
+async function loadErrors() {
+  const alias = $("errAliasFilter").value.trim();
+  const limit = $("errLimit").value || "100";
+  const qs = new URLSearchParams({ limit });
+  if (alias) qs.set("alias", alias);
+  const entries = await api("api/errors?" + qs.toString());
+  $("errorEmpty").style.display = entries.length ? "none" : "";
+  $("errorBody").innerHTML = entries.map(e => `<tr>
+    <td>${esc(e.time)}</td><td>${esc(e.alias)}</td><td>${esc(e.tool)}</td>
+    <td>${esc(e.type)}</td><td>${esc(e.role)}</td>
+    <td class="sql" title="${esc(e.sql)}">${esc(e.sql)}</td>
+    <td class="sql" title="${esc(e.db_error)}">${esc(e.db_error)}</td>
   </tr>`).join("");
 }
 
@@ -325,15 +380,17 @@ function openModal(alias) {
     $("f_write_user").value = (d.write_user || {}).user || "";
     $("f_write_policy").value = d.write_policy || "client_confirm";
     $("f_allow_delete").checked = !!d.allow_delete;
+    $("f_allow_ddl").checked = !!d.allow_ddl;
     $("f_skip_confirm").checked = !!d.skip_confirm;
+    $("f_query_timeout").value = d.query_timeout ?? "";
+    $("f_pool_size").value = d.pool_size ?? "";
     const s = d.ssh || {};
     $("f_ssh_enable").checked = !!s.enable;
     $("f_ssh_host").value = s.host || "";
     $("f_ssh_port").value = s.port ?? "";
     $("f_ssh_user").value = s.user || "";
     $("f_ssh_key_path").value = s.key_path || "";
-    $("f_ssh_local_port").value = s.local_port ?? "";
-    $("detailsSsh").open = !!s.enable;
+    $("detailsSsh").open = !!s.enable || d.query_timeout != null || d.pool_size != null;
   }
   $("modalMask").classList.remove("hidden");
 }
@@ -362,14 +419,16 @@ function collectForm() {
     write_user: { user: val("f_write_user"), password: $("f_write_pass").value },
     write_policy: $("f_write_policy").value,
     allow_delete: $("f_allow_delete").checked,
+    allow_ddl: $("f_allow_ddl").checked,
     skip_confirm: $("f_skip_confirm").checked,
+    query_timeout: num("f_query_timeout", 60),
+    pool_size: num("f_pool_size", 3),
     ssh: {
       enable: $("f_ssh_enable").checked,
       host: val("f_ssh_host") || null,
       port: num("f_ssh_port", 22),
       user: val("f_ssh_user") || null,
       key_path: val("f_ssh_key_path") || null,
-      local_port: num("f_ssh_local_port", 3330),
     },
   };
 }
@@ -413,6 +472,46 @@ async function setDefault(alias) {
   } catch (e) { alert("设置失败：" + e.message); }
 }
 
+/* ---------- 配置导出 / 导入 ---------- */
+async function exportConfig() {
+  try {
+    const cfg = await api("api/databases/export");
+    const blob = new Blob([JSON.stringify(cfg, null, 2)], { type: "application/json" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = "databases-" + new Date().toISOString().slice(0, 10) + ".json";
+    a.click();
+    URL.revokeObjectURL(a.href);
+  } catch (e) { alert("导出失败：" + e.message); }
+}
+
+async function importConfig(file) {
+  let cfg;
+  try { cfg = JSON.parse(await file.text()); }
+  catch (e) { alert("导入失败：文件不是合法 JSON"); return; }
+  const n = Object.keys(cfg.databases || {}).length;
+  if (!n) { alert("导入失败：文件中没有 databases 配置"); return; }
+  if (!confirm(`将用文件中的 ${n} 个数据库配置整体替换当前配置（含默认别名），现有配置会被覆盖。确定继续？`)) return;
+  try {
+    const r = await api("api/databases/import", { method: "POST", body: JSON.stringify(cfg) });
+    alert("导入成功：" + r.count + " 个配置，默认别名 " + r.default_alias);
+    loadDbs();
+  } catch (e) { alert("导入失败：" + e.message); }
+}
+
+/* ---------- 一键体检 ---------- */
+async function healthCheckAll() {
+  const aliases = Object.keys(dbs.databases).sort();
+  if (!aliases.length) { alert("暂无数据库配置"); return; }
+  const results = await Promise.all(aliases.map(async a => {
+    try {
+      const r = await testConn(a, false);
+      return `${a}: ${r.ok ? "✅ 正常" : "❌ " + (r.error || "失败")}`;
+    } catch (e) { return `${a}: ❌ 请求失败 ${e.message}`; }
+  }));
+  alert("全部体检结果：\n\n" + results.join("\n"));
+}
+
 /* ---------- 事件绑定与初始化 ---------- */
 $("f_db_type").onchange = () => {
   const t = $("f_db_type").value;
@@ -424,6 +523,16 @@ $("btnAdd").onclick = () => openModal(null);
 $("btnCancel").onclick = closeModal;
 $("modalMask").onclick = e => { if (e.target === $("modalMask")) closeModal(); };
 $("btnRefreshAudit").onclick = () => loadAudit().catch(e => alert("刷新失败：" + e.message));
+$("btnRefreshErrors").onclick = () => loadErrors().catch(e => alert("查询失败：" + e.message));
+$("errAliasFilter").onkeydown = e => { if (e.key === "Enter") $("btnRefreshErrors").click(); };
+$("btnExport").onclick = exportConfig;
+$("btnImport").onclick = () => $("importFile").click();
+$("importFile").onchange = e => {
+  const f = e.target.files[0];
+  if (f) importConfig(f);
+  e.target.value = "";  // 允许重复选择同一文件
+};
+$("btnHealthCheck").onclick = healthCheckAll;
 
 $("btnSave").onclick = async () => {
   $("formError").textContent = "";
@@ -452,6 +561,7 @@ $("btnTestRead").onclick = async () => {
 
 loadDbs().catch(e => { $("dbList").innerHTML = '<p class="empty">加载失败：' + esc(e.message) + "</p>"; });
 loadAudit().catch(e => { $("auditEmpty").textContent = "加载失败：" + e.message; });
+loadErrors().catch(e => { $("errorEmpty").textContent = "加载失败：" + e.message; });
 </script>
 </body>
 </html>
