@@ -398,7 +398,9 @@ function renderUsers() {
       <td>${esc(u.name)}</td>
       <td>${esc(u.user)}</td>
       <td>${esc(u.password || "（空）")}</td>
-      <td>${refs.length ? `<span class="badge danger">${refs.length}</span> <span class="warn" style="color:var(--muted)">${esc(refs.join("、"))}</span>` : "-"}</td>
+      <td>${refs.length
+        ? `<span style="display:inline-flex;align-items:center;gap:5px"><span class="badge danger">${refs.length}</span><span style="color:var(--muted)">${esc(refs.join("、"))}</span></span>`
+        : "-"}</td>
       <td><button class="btn" onclick="openUserModal('${esc(u.name)}')">编辑</button> ${del}</td>
     </tr>`;
   }).join("");
