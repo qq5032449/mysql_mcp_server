@@ -69,34 +69,89 @@ def _dameng_owner(entry: dict, db: str | None) -> str | None:
     return owner or None
 
 
+def _dameng_owner_filt(owner: str | None, alias: str = "") -> str:
+    """达梦 OWNER 过滤片段；alias 为表别名（如 "C"），空串表示不加前缀。"""
+    prefix = f"{alias}." if alias else ""
+    return f" AND UPPER({prefix}OWNER) = UPPER({qstr(owner)})" if owner else ""
+
+
+# 达梦列注释不在 ALL_TAB_COLUMNS 里（部分版本该列不存在），统一走 ALL_COL_COMMENTS
+# 左连接取；缺失时该列为 NULL，不影响其它元数据。
+_DM_COL_COMMENTS_JOIN = (
+    "FROM ALL_TAB_COLUMNS C LEFT JOIN ALL_COL_COMMENTS M "
+    "ON M.OWNER = C.OWNER AND M.TABLE_NAME = C.TABLE_NAME AND M.COLUMN_NAME = C.COLUMN_NAME "
+)
+
+
 def schema_sql(table: str | None, db: str | None, entry: dict) -> str:
     """构造列元数据查询；两种方言统一输出五列：列名、类型、可空、默认值、注释。"""
     if entry_db_type(entry) == DAMENG:
         # 达梦标识符默认大写存储，UPPER 比较兼容大小写写法
         owner = _dameng_owner(entry, db)
-        owner_filt = f" AND UPPER(OWNER) = UPPER({qstr(owner)})" if owner else ""
+        owner_filt = _dameng_owner_filt(owner, "C")
         if table:
             return (
-                "SELECT COLUMN_NAME, DATA_TYPE, NULLABLE, DATA_DEFAULT, COMMENTS "
-                "FROM ALL_TAB_COLUMNS WHERE "
-                f"UPPER(TABLE_NAME) = UPPER({qstr(table)}){owner_filt} ORDER BY COLUMN_ID"
+                "SELECT C.COLUMN_NAME, C.DATA_TYPE, C.NULLABLE, C.DATA_DEFAULT, M.COMMENTS "
+                f"{_DM_COL_COMMENTS_JOIN}"
+                f"WHERE UPPER(C.TABLE_NAME) = UPPER({qstr(table)}){owner_filt} "
+                "ORDER BY C.COLUMN_ID"
             )
         return (
-            "SELECT TABLE_NAME, COLUMN_NAME, DATA_TYPE, NULLABLE "
-            f"FROM ALL_TAB_COLUMNS WHERE 1=1{owner_filt} ORDER BY TABLE_NAME, COLUMN_ID"
+            "SELECT C.TABLE_NAME, C.COLUMN_NAME, C.DATA_TYPE, C.NULLABLE "
+            f"FROM ALL_TAB_COLUMNS C WHERE 1=1{owner_filt} "
+            "ORDER BY C.TABLE_NAME, C.COLUMN_ID"
         )
     if table:
-        schema_filter = f"TABLE_SCHEMA = '{db}'" if db else "TABLE_SCHEMA = DATABASE()"
+        schema_filter = f"TABLE_SCHEMA = {qstr(db)}" if db else "TABLE_SCHEMA = DATABASE()"
         return (
             "SELECT COLUMN_NAME, DATA_TYPE, IS_NULLABLE, COLUMN_DEFAULT, COLUMN_COMMENT "
             f"FROM information_schema.COLUMNS WHERE {schema_filter} "
-            f"AND TABLE_NAME = '{table}' ORDER BY ORDINAL_POSITION"
+            f"AND TABLE_NAME = {qstr(table)} ORDER BY ORDINAL_POSITION"
         )
     return (
         "SELECT TABLE_NAME, COLUMN_NAME, DATA_TYPE, IS_NULLABLE "
         "FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() "
         "ORDER BY TABLE_NAME, ORDINAL_POSITION"
     )
+
+
+def schema_sql_without_comments(table: str, db: str | None, entry: dict) -> str:
+    """列元数据查询的降级版（不含注释列），用于老版本达梦数据字典缺 COMMENTS 时重试。
+
+    MySQL 的 COLUMN_COMMENT 始终存在，直接复用 schema_sql。
+    """
+    if entry_db_type(entry) != DAMENG:
+        return schema_sql(table, db, entry)
+    owner_filt = _dameng_owner_filt(_dameng_owner(entry, db), "")
+    return (
+        "SELECT COLUMN_NAME, DATA_TYPE, NULLABLE, DATA_DEFAULT "
+        f"FROM ALL_TAB_COLUMNS WHERE UPPER(TABLE_NAME) = UPPER({qstr(table)})"
+        f"{owner_filt} ORDER BY COLUMN_ID"
+    )
+
+
+def column_names_sql(table: str, db: str | None, entry: dict) -> str:
+    """单表列名清单（单列输出），用于把「列不存在」的错误提示补上真实列。"""
+    if entry_db_type(entry) == DAMENG:
+        owner_filt = _dameng_owner_filt(_dameng_owner(entry, db), "")
+        return (
+            "SELECT COLUMN_NAME FROM ALL_TAB_COLUMNS "
+            f"WHERE UPPER(TABLE_NAME) = UPPER({qstr(table)}){owner_filt} ORDER BY COLUMN_ID"
+        )
+    schema_filter = f"TABLE_SCHEMA = {qstr(db)}" if db else "TABLE_SCHEMA = DATABASE()"
+    return (
+        "SELECT COLUMN_NAME FROM information_schema.COLUMNS "
+        f"WHERE {schema_filter} AND TABLE_NAME = {qstr(table)} ORDER BY ORDINAL_POSITION"
+    )
+
+
+def quote_ident_hint(entry: dict) -> str:
+    """标识符引用符提示（含方言说明），供语法错误时附在错误信息后。"""
+    if entry_db_type(entry) == DAMENG:
+        return ('库名/表名/别名含连字符、中文或与保留字同名时需加双引号，'
+                '例如 "MY-SCHEMA"."ORDER"')
+    return ('库名/表名/别名含连字符、中文或与保留字同名时需加反引号，'
+            '例如 `medical-my`.`consultation`')
 
 
 def sample_sql(db: str | None, tbl: str, limit: int, entry: dict) -> str:
@@ -130,15 +185,16 @@ def search_schema_sql(keyword: str, limit: int, entry: dict) -> str:
     lim = f"LIMIT {int(limit)}"
     if entry_db_type(entry) == DAMENG:
         owner = _dameng_owner(entry, None)
-        owner_filt = f" AND UPPER(OWNER) = UPPER({qstr(owner)})" if owner else ""
+        owner_filt = _dameng_owner_filt(owner, "C")
         return (
             "SELECT * FROM ("
             f"SELECT 'TABLE' AS KIND, TABLE_NAME AS LOC, TABLE_NAME AS NAME, NULL AS REMARK "
-            f"FROM ALL_TABLES WHERE 1=1{owner_filt} AND TABLE_NAME LIKE {kw} ESCAPE '\\' "
+            f"FROM ALL_TABLES WHERE 1=1{_dameng_owner_filt(owner, '')} "
+            f"AND TABLE_NAME LIKE {kw} ESCAPE '\\' "
             "UNION ALL "
-            f"SELECT 'COLUMN' AS KIND, TABLE_NAME AS LOC, COLUMN_NAME AS NAME, COMMENTS AS REMARK "
-            f"FROM ALL_TAB_COLUMNS WHERE 1=1{owner_filt} "
-            f"AND (COLUMN_NAME LIKE {kw} ESCAPE '\\' OR COMMENTS LIKE {kw} ESCAPE '\\') "
+            "SELECT 'COLUMN' AS KIND, C.TABLE_NAME AS LOC, C.COLUMN_NAME AS NAME, M.COMMENTS AS REMARK "
+            f"{_DM_COL_COMMENTS_JOIN} WHERE 1=1{owner_filt} "
+            f"AND (C.COLUMN_NAME LIKE {kw} ESCAPE '\\' OR M.COMMENTS LIKE {kw} ESCAPE '\\') "
             f") {lim}"
         )
     scope = (

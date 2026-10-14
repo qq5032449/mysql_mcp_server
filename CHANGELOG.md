@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.1] - 2026-10-14
+
+基于生产 `error_log.db`（75 条、2026-09-14~10-10）的分析结果，修复错误处理与配置校验上的四处短板。
+
+### Fixed
+- **达梦列注释查询报错（我方 bug）：**`get_schema_info` / `search_schema` 原先从 `ALL_TAB_COLUMNS` 直接取 `COMMENTS`，但部分达梦版本该视图没有此列（生产 `rpms-dm` 实测报 `Invalid column name [COMMENTS]`）。现改为 `LEFT JOIN ALL_COL_COMMENTS` 取注释；若该视图也不存在，`get_schema_info` 会自动降级重试一次不含注释的查询（`schema_sql_without_comments`），不会整体失败。
+
+### Added
+- **「列不存在」自动附真实列清单：**`Unknown column 'x'` / 达梦 `Invalid column name [x]` 时，从 SQL 中提取涉及的表（FROM/JOIN/UPDATE/INTO，最多 3 张）查出真实列名附在错误后，AI 无需再问一轮即可自纠。生产日志中此类错误占 49%，是收益最大的一项。查询失败不影响主流程，原始错误始终保留。
+- **语法错误附标识符引用符提示：**MySQL 与达梦的语法错误都会附上「库名/表名含连字符、中文或与保留字同名时需加引用符」的提示（MySQL 反引号、达梦双引号），对应生产里 `SHOW COLUMNS FROM medical-my.consultation` 一类失败。
+- **保存数据库时自动校验（不阻断）：**新建/修改数据库条目后自动做一次连通性与库存在性校验（复用「测试连接」逻辑），未通过时在响应 `warning` 字段与管理页面弹窗提示，保存本身照常生效——库暂时不可达或先建配置后建库都仍可用。`MYSQL_MCP_VERIFY_ON_SAVE=false` 可关闭。
+
+### Changed
+- `admin_api` 抽出 `probe_entry()` 供「测试连接」与保存校验共用；校验前会先展开用户引用，避免引用模式下探测拿到空账号。
+- 达梦方言的列元数据查询统一使用表别名（`C.` / `M.`），`_dameng_owner_filt()` 支持不带别名前缀（此前传空别名会拼出 `UPPER(.OWNER)` 的错误 SQL）。
+
 ## [0.6.0] - 2026-10-01
 
 ### Added

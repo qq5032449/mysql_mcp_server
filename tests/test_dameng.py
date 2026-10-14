@@ -61,18 +61,43 @@ class TestQuoteIdent:
 class TestDialectSql:
     def test_schema_sql_dameng_with_table(self):
         sql = db_drivers.schema_sql("EMP", None, dm_entry())
-        assert "ALL_TAB_COLUMNS" in sql
+        assert "ALL_TAB_COLUMNS C" in sql
+        assert "UPPER(C.TABLE_NAME) = UPPER('EMP')" in sql
+        assert "UPPER(C.OWNER) = UPPER('DMHR')" in sql  # 默认模式取条目 database
+
+    def test_schema_sql_dameng_comments_from_col_comments(self):
+        """列注释走 ALL_COL_COMMENTS 左连接：老版本 ALL_TAB_COLUMNS 没有 COMMENTS 列。"""
+        sql = db_drivers.schema_sql("EMP", None, dm_entry())
+        assert "LEFT JOIN ALL_COL_COMMENTS M" in sql
+        assert "M.OWNER = C.OWNER AND M.TABLE_NAME = C.TABLE_NAME AND M.COLUMN_NAME = C.COLUMN_NAME" in sql
+        assert "M.COMMENTS" in sql
+        # 不能直接从 ALL_TAB_COLUMNS 选 COMMENTS（老版本该列不存在）
+        assert "DATA_DEFAULT, COMMENTS FROM ALL_TAB_COLUMNS" not in sql
+
+    def test_schema_sql_without_comments_fallback(self):
+        sql = db_drivers.schema_sql_without_comments("EMP", None, dm_entry())
+        assert "COMMENTS" not in sql
         assert "UPPER(TABLE_NAME) = UPPER('EMP')" in sql
-        assert "UPPER(OWNER) = UPPER('DMHR')" in sql  # 默认模式取条目 database
+        assert "UPPER(OWNER) = UPPER('DMHR')" in sql
+        # MySQL 的 COLUMN_COMMENT 始终存在：降级版直接复用原查询
+        assert db_drivers.schema_sql_without_comments("t", "mydb", mysql_entry()) ==             db_drivers.schema_sql("t", "mydb", mysql_entry())
+
+    def test_column_names_sql_both_dialects(self):
+        dm = db_drivers.column_names_sql("EMP", None, dm_entry())
+        assert dm.startswith("SELECT COLUMN_NAME FROM ALL_TAB_COLUMNS")
+        assert "UPPER(OWNER) = UPPER('DMHR')" in dm
+        my = db_drivers.column_names_sql("t", "mydb", mysql_entry())
+        assert "information_schema.COLUMNS" in my and "TABLE_SCHEMA = 'mydb'" in my
+        assert "ORDER BY ORDINAL_POSITION" in my
 
     def test_schema_sql_dameng_explicit_db_wins(self):
         sql = db_drivers.schema_sql("EMP", "OTHER", dm_entry())
-        assert "UPPER(OWNER) = UPPER('OTHER')" in sql
+        assert "UPPER(C.OWNER) = UPPER('OTHER')" in sql
 
     def test_schema_sql_dameng_no_table(self):
         sql = db_drivers.schema_sql(None, None, dm_entry())
-        assert sql.startswith("SELECT TABLE_NAME, COLUMN_NAME")
-        assert "ALL_TAB_COLUMNS" in sql
+        assert sql.startswith("SELECT C.TABLE_NAME, C.COLUMN_NAME")
+        assert "FROM ALL_TAB_COLUMNS C" in sql
 
     def test_schema_sql_mysql_unchanged(self):
         sql = db_drivers.schema_sql("t", "mydb", mysql_entry())
@@ -250,7 +275,7 @@ class TestDamengEndToEnd:
         sent = cur.execute.call_args.args[0]
         assert "ALL_TAB_COLUMNS" in sent
         assert '"DMHR"' not in sent  # 模式走 OWNER 过滤而非引用拼接
-        assert "UPPER(OWNER) = UPPER('DMHR')" in sent
+        assert "UPPER(C.OWNER) = UPPER('DMHR')" in sent
         assert ce.call_args.args[1] == "read"
         assert "EMPNO" in r[0].text and ",NO" in r[0].text
 

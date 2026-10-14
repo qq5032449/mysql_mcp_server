@@ -13,6 +13,8 @@ def app(tmp_path, monkeypatch):
     monkeypatch.setattr(db_config, "CONFIG_FILE", tmp_path / "databases.json")
     monkeypatch.setattr(db_config, "CONFIG_DIR", tmp_path)
     monkeypatch.setattr(audit, "LOG_DIR", tmp_path)
+    # 保存时的自动连通性校验会真连库：测试里关掉（专门用例单独打开并 mock 探测）
+    monkeypatch.setenv("MYSQL_MCP_VERIFY_ON_SAVE", "false")
     db_config.reset_cache()
     audit.clear()
     admin_api._on_change_callbacks[:] = []

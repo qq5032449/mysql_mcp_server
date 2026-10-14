@@ -295,6 +295,7 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setattr(db_config, "CONFIG_FILE", tmp_path / "databases.json")
     monkeypatch.setattr(db_config, "CONFIG_DIR", tmp_path)
     monkeypatch.setattr(audit, "LOG_DIR", tmp_path)
+    monkeypatch.setenv("MYSQL_MCP_VERIFY_ON_SAVE", "false")
     for k in ("MYSQL_USER", "MYSQL_PASSWORD"):
         monkeypatch.delenv(k, raising=False)
     db_config.reset_cache()

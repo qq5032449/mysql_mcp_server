@@ -209,8 +209,10 @@ def test_like_pattern_escapes_wildcards():
 def test_search_schema_sql_dameng():
     e = make_entry(db_type="dameng", database="DMHR")
     sql = search_schema_sql("emp", 20, e)
-    assert "ALL_TABLES" in sql and "ALL_TAB_COLUMNS" in sql
+    assert "ALL_TABLES" in sql and "ALL_TAB_COLUMNS C" in sql
     assert "UPPER(OWNER) = UPPER('DMHR')" in sql
+    # 列注释改由 ALL_COL_COMMENTS 提供（老版本达梦数据字典无 COMMENTS 列）
+    assert "LEFT JOIN ALL_COL_COMMENTS M" in sql and "M.COMMENTS" in sql
     assert "ESCAPE" in sql
 
 

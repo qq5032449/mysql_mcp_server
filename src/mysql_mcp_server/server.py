@@ -22,7 +22,7 @@ from starlette.applications import Starlette
 from starlette.responses import PlainTextResponse, Response
 from starlette.routing import Mount, Route
 
-from mysql_mcp_server import admin_api, audit, conn_pool, db_config, db_drivers, error_log
+from mysql_mcp_server import admin_api, audit, conn_pool, db_config, db_drivers, error_log, sql_hints
 from mysql_mcp_server.ssh_tunnel import maybe_ssh_tunnel_for
 from mysql_mcp_server.sql_classify import (
     DDL_PREFIXES,
@@ -742,12 +742,22 @@ async def call_tool_impl(name: str, arguments: dict, alias: str | None = None) -
             else:
                 query = db_drivers.schema_sql(None, None, entry)
             if db_drivers.entry_db_type(entry) == db_drivers.DAMENG:
-                return await run_query_entry(
+                result = await run_query_entry(
                     entry, query, "read",
                     row_mapper=lambda r: db_drivers.schema_row_to_csv(r, entry),
                     alias=a, tool="get_schema_info", sql_type="SCHEMA",
                     audit_ctx=read_audit_ctx,
                 )
+                # 老版本达梦数据字典没有 COMMENTS 列：降级为不含注释的查询重试一次
+                if (tbl and _is_error_result(result)
+                        and sql_hints.is_missing_comments_error(_result_text(result))):
+                    logger.warning("Dameng dictionary lacks COMMENTS; retrying without comments")
+                    return await run_query_entry(
+                        entry, db_drivers.schema_sql_without_comments(tbl, db, entry), "read",
+                        alias=a, tool="get_schema_info", sql_type="SCHEMA",
+                        audit_ctx=read_audit_ctx,
+                    )
+                return result
             return await run_query_entry(entry, query, "read",
                                          alias=a, tool="get_schema_info", sql_type="SCHEMA",
                                          audit_ctx=read_audit_ctx)
@@ -945,6 +955,15 @@ def _format_query_result(cursor, conn, query: str, config: dict, row_mapper=None
     return [TextContent(type="text", text=f"Query executed successfully. Rows affected: {cursor.rowcount}")], cursor.rowcount
 
 
+def _result_text(result: list[TextContent]) -> str:
+    return result[0].text if result else ""
+
+
+def _is_error_result(result: list[TextContent]) -> bool:
+    """run_query_entry 失败时返回的文本以 "Error executing query:" 开头。"""
+    return _result_text(result).startswith("Error executing query")
+
+
 async def run_query_entry(entry: dict, query: str, role: str, row_mapper=None,
                           alias: str | None = None, tool: str | None = None,
                           sql_type: str | None = None,
@@ -987,7 +1006,9 @@ async def run_query_entry(entry: dict, query: str, role: str, row_mapper=None,
                                  status="error",
                                  elapsed_ms=int((time.monotonic() - started) * 1000),
                                  rows=None)
-                return [TextContent(type="text", text=f"Error executing query: {error_msg}")]
+                # 列不存在/语法错误时补可操作提示（附真实列名、引用符说明）
+                hinted = sql_hints.augment_error(entry, query, error_msg)
+                return [TextContent(type="text", text=f"Error executing query: {hinted}")]
     return await anyio.to_thread.run_sync(_sync_run)
 
 async def main():

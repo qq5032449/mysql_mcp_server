@@ -113,7 +113,12 @@ async def create_database(request: Request):
         cfg["default_alias"] = alias
     db_config.save_config(cfg)
     _notify_changed(alias)
-    return JSONResponse({"ok": True, "default_alias": cfg["default_alias"]}, status_code=201)
+    # 保存后自动校验（不阻断）：库名写错或库不存在时立即提示，避免日后查询才暴露
+    warning = await verify_entry_saved(entry)
+    resp = {"ok": True, "default_alias": cfg["default_alias"]}
+    if warning:
+        resp["warning"] = warning
+    return JSONResponse(resp, status_code=201)
 
 
 async def update_database(request: Request):
@@ -135,7 +140,11 @@ async def update_database(request: Request):
     cfg["databases"][alias] = new
     db_config.save_config(cfg)
     _notify_changed(alias)
-    return JSONResponse({"ok": True})
+    warning = await verify_entry_saved(new)
+    resp = {"ok": True}
+    if warning:
+        resp["warning"] = warning
+    return JSONResponse(resp)
 
 
 async def delete_database(request: Request):
@@ -197,6 +206,98 @@ async def import_databases(request: Request):
                          "count": len(normalized), "users": len(users)})
 
 
+def probe_entry(entry: dict, role: str = "read") -> str | None:
+    """连接探测：返回 None 表示连通且库/模式可见，否则返回中文错误说明。
+
+    先验证实例连通与账号认证（连接不带库名），再单独校验库（达梦为模式）存在且可见——
+    直接带库名连接只能得到驱动的 "Unknown database"，无法区分是实例不通还是库写错。
+    供「测试连接」与保存时的自动校验共用。
+    """
+    if db_drivers.entry_db_type(entry) == db_drivers.DAMENG:
+        try:
+            import dmPython  # noqa: F401
+        except ImportError:
+            return "未安装 dmPython 驱动：pip install dmPython"
+        with ssh_tunnel.maybe_ssh_tunnel_for(entry) as (host, port):
+            probe = {**entry, "database": None}
+            try:
+                conn = db_drivers.connect_entry(probe, role, host, port)
+            except Exception as e:
+                return db_drivers.error_message(entry, e)
+            try:
+                schema = entry.get("database")
+                if not schema:
+                    return None
+                with conn.cursor() as cursor:
+                    cursor.execute(
+                        "SELECT USERNAME FROM ALL_USERS WHERE UPPER(USERNAME) = UPPER("
+                        f"{db_drivers.qstr(schema)})"
+                    )
+                    if cursor.fetchone() is None:
+                        return (f"模式（schema）'{schema}' 不存在或当前账号无权访问"
+                                "（实例连接与账号认证均正常）")
+                return None
+            except Exception as e:
+                return db_drivers.error_message(entry, e)
+            finally:
+                conn.close()
+
+    import mysql.connector
+    db_name = entry.get("database")
+    with ssh_tunnel.maybe_ssh_tunnel_for(entry) as (host, port):
+        conn_cfg = db_drivers.build_config(entry, role, host, port)
+        conn_cfg.pop("database", None)
+        conn_cfg["connect_timeout"] = 5
+        try:
+            conn = mysql.connector.connect(**conn_cfg)
+        except Exception as e:
+            return str(getattr(e, "msg", None) or e)
+        try:
+            if not db_name:
+                return None  # 多数据库模式：无库名校验
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    "SELECT SCHEMA_NAME FROM information_schema.SCHEMATA"
+                    " WHERE SCHEMA_NAME = %s",
+                    (db_name,),
+                )
+                if cursor.fetchone() is None:
+                    return (f"数据库 '{db_name}' 不存在或当前账号无权访问"
+                            "（实例连接与账号认证均正常）")
+            return None
+        except Exception as e:
+            return str(getattr(e, "msg", None) or e)
+        finally:
+            conn.close()
+
+
+def verify_on_save() -> bool:
+    """保存数据库时是否自动校验连通性与库存在（默认开）；MYSQL_MCP_VERIFY_ON_SAVE=false 关闭。"""
+    return os.getenv("MYSQL_MCP_VERIFY_ON_SAVE", "true").strip().lower() != "false"
+
+
+async def verify_entry_saved(entry: dict) -> str | None:
+    """保存后的自动校验：返回 warning 文案（None 表示无问题）。
+
+    只做提示不阻断保存——库暂时不可达、或先建配置后建库都是合理场景。
+    """
+    if not verify_on_save():
+        return None
+    # 引用模式必须先把用户账号展开，否则探测拿到的是空账号
+    probe = dict(entry)
+    db_config.expand_entry(probe, db_config.load_config())
+    if probe.get("_account_error"):
+        return f"保存成功，但自动校验未通过：{probe['_account_error']}"
+    probe.pop("_account_error", None)
+    try:
+        error = await anyio.to_thread.run_sync(lambda: probe_entry(probe, "read"))
+    except Exception as e:
+        return f"保存成功，但自动校验未能完成：{e}"
+    if error is None:
+        return None
+    return f"保存成功，但自动校验未通过：{error}"
+
+
 async def test_connection(request: Request):
     alias = request.path_params["alias"]
     body = await _body(request)
@@ -210,74 +311,7 @@ async def test_connection(request: Request):
     if entry.get("_account_error"):
         return JSONResponse({"ok": False, "error": entry["_account_error"], "role": "read"}, status_code=200)
     role = "write" if body.get("as_write") else "read"
-    if db_drivers.entry_db_type(entry) == db_drivers.DAMENG:
-        try:
-            import dmPython
-        except ImportError:
-            return JSONResponse({"ok": False, "error": "未安装 dmPython 驱动：pip install dmPython", "role": role})
-
-        def _try() -> str | None:
-            # 连接探测不带 schema：先验证实例与账号，再单独校验模式是否存在/可见，
-            # 两类错误可区分（驱动对不存在 schema 的报错信息通常不明确）
-            with ssh_tunnel.maybe_ssh_tunnel_for(entry) as (host, port):
-                probe = {**entry, "database": None}
-                try:
-                    conn = db_drivers.connect_entry(probe, role, host, port)
-                except Exception as e:
-                    return db_drivers.error_message(entry, e)
-                try:
-                    schema = entry.get("database")
-                    if not schema:
-                        return None
-                    with conn.cursor() as cursor:
-                        cursor.execute(
-                            "SELECT USERNAME FROM ALL_USERS WHERE UPPER(USERNAME) = UPPER("
-                            f"{db_drivers.qstr(schema)})"
-                        )
-                        if cursor.fetchone() is None:
-                            return (f"模式（schema）'{schema}' 不存在或当前账号无权访问"
-                                    "（实例连接与账号认证均正常）")
-                    return None
-                except Exception as e:
-                    return db_drivers.error_message(entry, e)
-                finally:
-                    conn.close()
-    else:
-        import mysql.connector
-        db_name = entry.get("database")
-        # 复用 build_config（含 use_pure 等统一设置），仅去掉库名：
-        # 连接探测不带 database，先验证实例与账号，库存在性再单独查 SCHEMATA
-
-        def _try() -> str | None:
-            # 连接探测不带 database：先验证实例与账号，再查 SCHEMATA 校验库存在且可见；
-            # 直接带 database 连接只能得到驱动的 "Unknown database"，无法区分两者
-            with ssh_tunnel.maybe_ssh_tunnel_for(entry) as (host, port):
-                conn_cfg = db_drivers.build_config(entry, role, host, port)
-                conn_cfg.pop("database", None)
-                conn_cfg["connect_timeout"] = 5
-                try:
-                    conn = mysql.connector.connect(**conn_cfg)
-                except Exception as e:
-                    return str(getattr(e, "msg", None) or e)
-                try:
-                    if not db_name:
-                        return None  # 多数据库模式：无库名校验
-                    with conn.cursor() as cursor:
-                        cursor.execute(
-                            "SELECT SCHEMA_NAME FROM information_schema.SCHEMATA"
-                            " WHERE SCHEMA_NAME = %s",
-                            (db_name,),
-                        )
-                        if cursor.fetchone() is None:
-                            return (f"数据库 '{db_name}' 不存在或当前账号无权访问"
-                                    "（实例连接与账号认证均正常）")
-                    return None
-                except Exception as e:
-                    return str(getattr(e, "msg", None) or e)
-                finally:
-                    conn.close()
-
-    error = await anyio.to_thread.run_sync(_try)
+    error = await anyio.to_thread.run_sync(lambda: probe_entry(entry, role))
     if error is None:
         return JSONResponse({"ok": True})
     return JSONResponse({"ok": False, "error": error, "role": role})

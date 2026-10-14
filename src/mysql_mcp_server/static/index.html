@@ -626,12 +626,15 @@ function collectForm() {
 async function doSave() {
   const data = collectForm();
   if (!data) return null;
+  let resp;
   if (editingAlias) {
-    await api("api/databases/" + encodeURIComponent(editingAlias),
-              { method: "PUT", body: JSON.stringify(data) });
+    resp = await api("api/databases/" + encodeURIComponent(editingAlias),
+                     { method: "PUT", body: JSON.stringify(data) });
   } else {
-    await api("api/databases", { method: "POST", body: JSON.stringify(data) });
+    resp = await api("api/databases", { method: "POST", body: JSON.stringify(data) });
   }
+  // 保存后的自动校验结果（库名写错/库不存在/实例不通）——保存已生效，仅提示
+  if (resp && resp.warning) alert(resp.warning);
   return data.alias;
 }
 
