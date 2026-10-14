@@ -38,7 +38,7 @@ def entry(alias="db1", **kw):
 class TestLoad:
     def test_missing_file_returns_empty(self, cfg_file, no_env):
         cfg = db_config.load_config()
-        assert cfg == {"default_alias": None, "databases": {}}
+        assert cfg == {"default_alias": None, "users": {}, "databases": {}}
 
     def test_load_existing(self, cfg_file, no_env):
         cfg_file.write_text(json.dumps({"default_alias": "db1", "databases": {"db1": entry()}}), encoding="utf-8")
@@ -48,7 +48,7 @@ class TestLoad:
 
     def test_load_corrupt_file_returns_empty(self, cfg_file, no_env):
         cfg_file.write_text("{not json", encoding="utf-8")
-        assert db_config.load_config() == {"default_alias": None, "databases": {}}
+        assert db_config.load_config() == {"default_alias": None, "users": {}, "databases": {}}
 
     def test_load_corrupt_backs_up(self, cfg_file, no_env):
         cfg_file.write_text("{not json", encoding="utf-8")

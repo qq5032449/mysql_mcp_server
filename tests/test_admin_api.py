@@ -165,7 +165,7 @@ class TestCrud:
     def test_empty_list(self, client, no_env):
         r = client.get("/api/databases")
         assert r.status_code == 200
-        assert r.json() == {"default_alias": None, "databases": {}}
+        assert r.json() == {"default_alias": None, "users": {}, "databases": {}}
 
     def test_create_and_mask(self, client, no_env):
         r = client.post("/api/databases", json=payload())
@@ -210,7 +210,7 @@ class TestCrud:
         r = client.delete("/api/databases/db1")
         assert r.status_code == 200
         body = client.get("/api/databases").json()
-        assert body == {"default_alias": None, "databases": {}}
+        assert body == {"default_alias": None, "users": {}, "databases": {}}
 
     def test_delete_default_switches_to_remaining(self, client, no_env):
         client.post("/api/databases", json=payload("db1"))

@@ -2,7 +2,7 @@
   "manifest_version": "0.4",
   "name": "mysql-mcp-server",
   "display_name": "MySQL MCP Server",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Secure MySQL access for AI assistants: list tables, inspect schemas, sample data, and execute SQL with read/write account separation and two-step confirmation for writes.",
   "long_description": "A Model Context Protocol (MCP) server for MySQL. AI assistants can discover tables, inspect column metadata, sample rows, and run ad-hoc SQL. Reads use a read-only account; writes and deletes require explicit user confirmation (server popup or chat-based token flow, with a 6-second cooling period). Failed executions are recorded to a local error log. Multi-database aliases, SSH tunnels, and Dameng DM8 are supported via the config file; bundle mode configures a single database through the install UI.",
   "author": {

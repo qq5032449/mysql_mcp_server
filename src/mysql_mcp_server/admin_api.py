@@ -100,12 +100,12 @@ async def get_databases(request: Request):
 async def create_database(request: Request):
     body = await _body(request)
     alias = str(body.get("alias", "")).strip()
+    cfg = db_config.load_config()
     try:
-        db_config.validate_entry(alias, body)
+        db_config.validate_entry(alias, body, cfg)
         entry = db_config.normalize_entry(body)
     except ValueError as e:
         return JSONResponse({"error": str(e)}, status_code=400)
-    cfg = db_config.load_config()
     if alias in cfg["databases"]:
         return JSONResponse({"error": f"别名 {alias} 已存在"}, status_code=409)
     cfg["databases"][alias] = entry
@@ -124,13 +124,13 @@ async def update_database(request: Request):
     if old is None:
         return JSONResponse({"error": f"别名 {alias} 不存在"}, status_code=404)
     try:
-        db_config.validate_entry(alias, body)
+        db_config.validate_entry(alias, body, cfg)
         new = db_config.normalize_entry(body)
     except ValueError as e:
         return JSONResponse({"error": str(e)}, status_code=400)
-    # 密码为空表示不修改
+    # 内联账号模式下密码为空表示不修改；引用模式密码来自用户表，无需处理
     for role in ("read_user", "write_user"):
-        if not new[role]["password"]:
+        if not new.get(f"{role}_ref") and not new[role]["password"]:
             new[role]["password"] = old[role]["password"]
     cfg["databases"][alias] = new
     db_config.save_config(cfg)
@@ -158,25 +158,43 @@ async def export_databases(request: Request):
 
 
 async def import_databases(request: Request):
-    """整份导入配置：校验全部条目后原子替换；导入内容应来自 export_databases。"""
+    """整份导入配置：校验 users 与全部库条目（含引用完整性）后原子替换。
+
+    导入内容应来自 export_databases。
+    """
     body = await _body(request)
     if not isinstance(body.get("databases"), dict) or not body["databases"]:
         return JSONResponse({"error": "导入内容必须包含非空的 databases 对象"}, status_code=400)
+    users_raw = body.get("users") or {}
+    if not isinstance(users_raw, dict):
+        return JSONResponse({"error": "导入内容 users 必须是对象"}, status_code=400)
+    users: dict[str, dict] = {}
+    for name, rec in users_raw.items():
+        name = str(name).strip()
+        try:
+            db_config.validate_user(name, rec or {})
+            users[name] = db_config.normalize_user(rec or {})
+        except ValueError as e:
+            return JSONResponse({"error": f"用户 {name} 校验失败：{e}"}, status_code=400)
+    # 引用完整性：导入的配置必须自洽（用户已在本批 users 中或内联账号有效）
+    for alias, entry in body["databases"].items():
+        try:
+            db_config.validate_entry(str(alias).strip(), entry or {}, {"users": users})
+        except ValueError as e:
+            return JSONResponse({"error": f"条目 {alias} 校验失败：{e}"}, status_code=400)
     normalized: dict[str, dict] = {}
     for alias, entry in body["databases"].items():
         alias = str(alias).strip()
-        try:
-            db_config.validate_entry(alias, entry or {})
-            normalized[alias] = db_config.normalize_entry(entry or {})
-        except ValueError as e:
-            return JSONResponse({"error": f"条目 {alias} 校验失败：{e}"}, status_code=400)
+        normalized[alias] = db_config.normalize_entry(entry or {})
     default_alias = str(body.get("default_alias") or "").strip() or None
     if default_alias and default_alias not in normalized:
         return JSONResponse({"error": f"default_alias {default_alias} 不在导入条目中"}, status_code=400)
-    cfg = {"default_alias": default_alias or sorted(normalized)[0], "databases": normalized}
+    cfg = {"default_alias": default_alias or sorted(normalized)[0],
+           "users": users, "databases": normalized}
     db_config.save_config(cfg)
     _notify_changed(None)
-    return JSONResponse({"ok": True, "default_alias": cfg["default_alias"], "count": len(normalized)})
+    return JSONResponse({"ok": True, "default_alias": cfg["default_alias"],
+                         "count": len(normalized), "users": len(users)})
 
 
 async def test_connection(request: Request):
@@ -186,6 +204,11 @@ async def test_connection(request: Request):
     entry = cfg["databases"].get(alias)
     if entry is None:
         return JSONResponse({"error": f"别名 {alias} 不存在"}, status_code=404)
+    # 引用模式：展开为用户表中的账号密码；悬空引用直接报可操作的提示
+    entry = dict(entry)
+    db_config.expand_entry(entry, cfg)
+    if entry.get("_account_error"):
+        return JSONResponse({"ok": False, "error": entry["_account_error"], "role": "read"}, status_code=200)
     role = "write" if body.get("as_write") else "read"
     if db_drivers.entry_db_type(entry) == db_drivers.DAMENG:
         try:
@@ -272,6 +295,83 @@ async def update_settings(request: Request):
     return JSONResponse({"ok": True, "default_alias": alias})
 
 
+# ---------------------------------------------------------------------------
+# 用户管理：名称即唯一键，账号/密码为凭证；数据库条目通过 *_user_ref 引用
+# ---------------------------------------------------------------------------
+
+async def list_users(request: Request):
+    """用户列表（密码脱敏；附带被引用情况，供前端展示与删除前判断）。"""
+    users = db_config.list_users()
+    out = []
+    for name, rec in users.items():
+        out.append({"name": name, "user": rec.get("user", ""),
+                    "password": "****" if rec.get("password") else "",
+                    "references": db_config.user_references(name)})
+    out.sort(key=lambda u: u["name"])
+    return JSONResponse({"users": out})
+
+
+async def create_user(request: Request):
+    body = await _body(request)
+    name = str(body.get("name", "")).strip()
+    try:
+        db_config.create_user(name, body)
+    except ValueError as e:
+        status = 409 if "已存在" in str(e) else 400
+        return JSONResponse({"error": str(e)}, status_code=status)
+    _notify_changed(None)
+    return JSONResponse({"ok": True, "name": name}, status_code=201)
+
+
+async def update_user(request: Request):
+    name = request.path_params["name"]
+    body = await _body(request)
+    new_name = str(body.get("name", name)).strip()
+    try:
+        db_config.update_user(name, new_name, body)
+    except ValueError as e:
+        status = 409 if "已存在" in str(e) else (404 if "不存在" in str(e) else 400)
+        return JSONResponse({"error": str(e)}, status_code=status)
+    _notify_changed(None)
+    return JSONResponse({"ok": True, "name": new_name, "renamed": new_name != name})
+
+
+async def delete_user(request: Request):
+    name = request.path_params["name"]
+    force = request.query_params.get("force") == "true"
+    refs = db_config.user_references(name)
+    if refs and not force:
+        return JSONResponse({"error": f"用户「{name}」正被 {len(refs)} 个数据库引用：{', '.join(refs)}",
+                             "references": refs}, status_code=409)
+    try:
+        if refs:
+            # 强制删除：清空所有引用
+            cfg = db_config.load_config()
+            for entry in (cfg.get("databases") or {}).values():
+                for field in ("read_user_ref", "write_user_ref"):
+                    if entry.get(field) == name:
+                        entry[field] = None
+            cfg["users"].pop(name, None)
+            db_config.save_config(cfg)
+        else:
+            db_config.delete_user(name)
+    except ValueError as e:
+        status = 404 if "不存在" in str(e) else 400
+        return JSONResponse({"error": str(e)}, status_code=status)
+    _notify_changed(None)
+    return JSONResponse({"ok": True, "force_cleared": len(refs)})
+
+
+async def migrate_inline_users(request: Request):
+    """把各库的内联账号迁成用户记录并改为引用。"""
+    try:
+        result = db_config.migrate_inline_accounts()
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    _notify_changed(None)
+    return JSONResponse({"ok": True, **result})
+
+
 async def get_audit(request: Request):
     return JSONResponse(audit.list_entries())
 
@@ -285,7 +385,9 @@ async def get_errors(request: Request):
 
 async def get_health(request: Request):
     cfg = db_config.load_config()
-    return JSONResponse({"status": "ok", "databases": len(cfg.get("databases", {}))})
+    return JSONResponse({"status": "ok",
+                          "databases": len(cfg.get("databases", {})),
+                          "users": len(cfg.get("users") or {})})
 
 
 class _GuardMiddleware(BaseHTTPMiddleware):
@@ -321,6 +423,11 @@ def create_admin_app() -> Starlette:
             Route("/api/databases/{alias}", delete_database, methods=["DELETE"]),
             Route("/api/databases/{alias}/test", test_connection, methods=["POST"]),
             Route("/api/settings", update_settings, methods=["PUT"]),
+            Route("/api/users", list_users, methods=["GET"]),
+            Route("/api/users", create_user, methods=["POST"]),
+            Route("/api/users/migrate", migrate_inline_users, methods=["POST"]),
+            Route("/api/users/{name}", update_user, methods=["PUT"]),
+            Route("/api/users/{name}", delete_user, methods=["DELETE"]),
             Route("/api/audit", get_audit, methods=["GET"]),
             Route("/api/errors", get_errors, methods=["GET"]),
             Route("/api/health", get_health, methods=["GET"]),

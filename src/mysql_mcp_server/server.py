@@ -696,6 +696,9 @@ def _resolve_for_call(alias: str | None, arguments: dict) -> tuple[str | None, d
     if resolved is None:
         return None, None, _NO_CONFIG_HINT
     a, entry = resolved
+    # 引用用户被删除/改名后配置会悬空：给 AI 可操作的指引，而不是连接报认证失败
+    if entry.get("_account_error"):
+        return a, None, f"数据库 [{a}] {entry['_account_error']}"
     return a, entry, ""
 
 
@@ -1118,6 +1121,8 @@ def build_starlette_app(security_settings=None):
             await transport.handle_post_message(scope, receive, send)
 
     admin_api.register_on_change(invalidate_alias)
+    # 账号/密码变更后旧连接池指纹失效：清空池缓存，下次调用按新配置重建
+    admin_api.register_on_change(lambda _alias: conn_pool.clear_all())
 
     return Starlette(routes=[
         Route("/", endpoint=health_check),

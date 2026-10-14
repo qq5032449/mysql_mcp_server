@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-10-01
+
+### Added
+- **用户维护功能：**新增顶层 `users` 用户表（名称即唯一键，含账号/密码），数据库条目通过 `read_user_ref`/`write_user_ref` 引用用户，
+  连接数据库时使用被引用用户的账号密码。管理页面新增「用户管理」卡片（表格 + 添加/编辑/删除 + 迁移内联账号），
+  数据库表单的用户名/密码输入改为下拉选择用户（读写账号可分别指定，也可选同一用户）。
+- **用户管理 API：**`GET/POST /api/users`、`PUT/DELETE /api/users/{name}`、`POST /api/users/migrate`；
+  列表与被引用情况脱敏返回，非回环访问同样受 ADMIN_TOKEN 保护。
+- **改名级联：**修改用户名称时，后端自动同步所有数据库的引用，引用永不悬空。
+- **删除保护：**用户正被数据库引用时拒绝删除（409 + 引用列表）；`DELETE ?force=true` 可强制删除并清空引用（管理页面二次确认）。
+- **一键迁移：**`POST /api/users/migrate` 与页面按钮把仍使用内联账号的数据库迁成用户引用（按账号名去重，读写同账号合并）。
+- **悬空引用提示：**引用用户被手工删改后，工具调用立即返回「数据库引用的用户不存在」的中文指引，而非连接报认证失败。
+
+### Changed
+- **配置结构：**`databases.json` 新增顶层 `users` 键；`masked_config` 同步脱敏用户密码；`/api/health` 增加 `users` 计数。
+  旧版本配置无 `users` 键时自动补空表，零迁移；数据库内联账号（`read_user`/`write_user`）与 `.env` 单库回退模式继续可用。
+- `validate_entry` 增加 `cfg` 参数并按引用校验；导入配置时同步校验 users 与引用完整性。
+- 管理页「测试连接」在引用模式下先展开用户账号，悬空引用直接返回可操作提示。
+
 ## [0.5.0] - 2026-10-01
 
 ### Added

@@ -79,6 +79,22 @@
 </div>
 
 <div class="card">
+  <h2>用户管理
+    <button class="btn" id="btnMigrateUsers">迁移内联账号</button>
+    <button class="btn primary" id="btnAddUser">＋ 添加用户</button>
+  </h2>
+  <p class="hint">
+    用户保存数据库账号密码，供各数据库引用（读写账号可分别指定）。
+    修改密码后所有引用它的数据库立即生效；名称是唯一标识，改名会自动同步所有引用。
+  </p>
+  <table>
+    <thead><tr><th>名称</th><th>账号</th><th>密码</th><th>被引用</th><th>操作</th></tr></thead>
+    <tbody id="userBody"></tbody>
+  </table>
+  <p class="empty" id="userEmpty">暂无用户，点击右上角"添加用户"开始</p>
+</div>
+
+<div class="card">
   <h2>客户端接入说明</h2>
   <div id="sseList"><p class="empty">加载中…</p></div>
   <p class="hint">
@@ -145,15 +161,33 @@
       <fieldset>
         <legend>查询用户（只读）</legend>
         <div class="grid">
-          <div><label>用户名 *</label><input id="f_read_user" required></div>
-          <div><label>密码</label><input id="f_read_pass" type="password"></div>
+          <div class="full">
+            <label>选择用户 *</label>
+            <select id="f_read_user_ref"></select>
+            <span class="warn" style="color:var(--muted)" id="readUserHint">在「用户管理」中维护账号密码；同一账号可被多个库引用</span>
+          </div>
+          <div class="full" id="readInlineBox" style="display:none">
+            <div class="grid">
+              <div><label>用户名（内联）</label><input id="f_read_user"></div>
+              <div><label>密码（内联）</label><input id="f_read_pass" type="password"></div>
+            </div>
+          </div>
         </div>
       </fieldset>
       <fieldset>
         <legend>操作用户（读写）</legend>
         <div class="grid">
-          <div><label>用户名 *</label><input id="f_write_user" required></div>
-          <div><label>密码</label><input id="f_write_pass" type="password"></div>
+          <div class="full">
+            <label>选择用户 *</label>
+            <select id="f_write_user_ref"></select>
+            <span class="warn" style="color:var(--muted)">可与查询用户相同（单账号模式）</span>
+          </div>
+          <div class="full" id="writeInlineBox" style="display:none">
+            <div class="grid">
+              <div><label>用户名（内联）</label><input id="f_write_user"></div>
+              <div><label>密码（内联）</label><input id="f_write_pass" type="password"></div>
+            </div>
+          </div>
         </div>
       </fieldset>
       <fieldset>
@@ -199,6 +233,25 @@
       <button type="button" class="btn" id="btnCancel">取消</button>
       <button type="button" class="btn" id="btnTestRead">测试连接（读账号）</button>
       <button type="button" class="btn primary" id="btnSave">保存</button>
+    </div>
+  </div>
+</div>
+
+<div class="mask hidden" id="userMask">
+  <div class="modal">
+    <h2 id="userModalTitle">添加用户</h2>
+    <form id="userForm" onsubmit="return false">
+      <div class="grid">
+        <div><label>名称 *</label><input id="u_name" required placeholder="生产只读"></div>
+        <div><label>账号 *</label><input id="u_user" required placeholder="readonly_prod"></div>
+        <div><label>密码</label><input id="u_pass" type="password" placeholder="编辑时留空表示不修改"></div>
+      </div>
+      <p class="hint">名称是唯一标识，改名会自动同步所有引用它的数据库；账号密码保存在服务端，界面不回显。</p>
+    </form>
+    <div class="error" id="userFormError"></div>
+    <div class="modal-actions">
+      <button type="button" class="btn" id="btnUserCancel">取消</button>
+      <button type="button" class="btn primary" id="btnUserSave">保存</button>
     </div>
   </div>
 </div>
@@ -260,6 +313,7 @@ async function loadDbs() {
   dbs = await api("api/databases");
   renderDbs();
   renderSse();
+  renderUserOptions();
 }
 
 function renderDbs() {
@@ -290,7 +344,7 @@ function renderDbs() {
         </span>
       </div>
       <div class="db-meta">${esc(d.host)}:${esc(d.port)}/${esc(d.database || "-")}
-        · 读: ${esc(d.read_user.user)} · 写: ${esc(d.write_user.user)}
+        · 读: ${esc(d.read_user_ref || (d.read_user || {}).user || "-")} · 写: ${esc(d.write_user_ref || (d.write_user || {}).user || "-")}
         · 写策略: ${esc(POLICY_LABEL[d.write_policy] || d.write_policy)}
         ${d.projects && d.projects.length ? '<br>项目: ' + esc(d.projects.join(", ")) : ""}</div>
     </div>`;
@@ -318,6 +372,122 @@ function copySse(el) {
     () => alert("已复制: " + text),
     () => alert("复制失败，请手动选择复制: " + text)
   );
+}
+
+/* ---------- 用户管理 ---------- */
+const INLINE_OPTION = "__inline__";
+let users = [];           // [{name, user, password(脱敏), references[]}]
+let editingUser = null;
+
+async function loadUsers() {
+  users = (await api("api/users")).users || [];
+  renderUsers();
+  renderUserOptions();
+}
+
+function userNames() { return users.map(u => u.name); }
+
+function renderUsers() {
+  $("userEmpty").style.display = users.length ? "none" : "";
+  $("userBody").innerHTML = users.map(u => {
+    const refs = u.references || [];
+    const del = refs.length
+      ? `<button class="btn" disabled title="被 ${refs.length} 个数据库引用，请先修改这些库">删除</button>`
+      : `<button class="btn danger" onclick="removeUser('${esc(u.name)}')">删除</button>`;
+    return `<tr>
+      <td>${esc(u.name)}</td>
+      <td>${esc(u.user)}</td>
+      <td>${esc(u.password || "（空）")}</td>
+      <td>${refs.length ? `<span class="badge danger">${refs.length}</span> <span class="warn" style="color:var(--muted)">${esc(refs.join("、"))}</span>` : "-"}</td>
+      <td><button class="btn" onclick="openUserModal('${esc(u.name)}')">编辑</button> ${del}</td>
+    </tr>`;
+  }).join("");
+}
+
+/* 把用户填进数据库表单的两个下拉；选中「内联」时显示旧的内联输入框 */
+function renderUserOptions() {
+  const names = userNames();
+  for (const [selectId, boxId] of [["f_read_user_ref", "readInlineBox"], ["f_write_user_ref", "writeInlineBox"]]) {
+    const sel = $(selectId);
+    if (!sel) continue;
+    const prev = sel.value;
+    sel.innerHTML =
+      `<option value="">— 请选择用户 —</option>` +
+      names.map(n => `<option value="${esc(n)}">${esc(n)}</option>`).join("") +
+      `<option value="${INLINE_OPTION}">内联账号（旧配置）</option>`;
+    if (prev && [...sel.options].some(o => o.value === prev)) sel.value = prev;
+  }
+  $("readUserHint").style.display = names.length ? "" : "none";
+}
+
+function toggleInline(boxId, value) {
+  $(boxId).style.display = value === INLINE_OPTION ? "" : "none";
+  $("f_read_user").required = false;   // HTML required 交给后端 validate_entry 报中文错
+  $("f_write_user").required = false;
+}
+
+function openUserModal(name) {
+  editingUser = name || null;
+  $("userFormError").textContent = "";
+  $("userModalTitle").textContent = name ? "编辑用户：" + name : "添加用户";
+  $("userForm").reset();
+  if (name) {
+    const u = users.find(x => x.name === name) || {};
+    $("u_name").value = u.name || "";
+    $("u_user").value = u.user || "";
+  }
+  $("u_name").readOnly = false;  // 名称即键，改名走级联更新
+  $("userMask").classList.remove("hidden");
+}
+
+function closeUserModal() { $("userMask").classList.add("hidden"); }
+
+async function saveUser() {
+  $("userFormError").textContent = "";
+  if (!$("userForm").reportValidity()) return;
+  const data = {
+    name: $("u_name").value.trim(),
+    user: $("u_user").value.trim(),
+    password: $("u_pass").value,   // 空 = 不修改
+  };
+  try {
+    if (editingUser) {
+      const r = await api("api/users/" + encodeURIComponent(editingUser),
+                          { method: "PUT", body: JSON.stringify(data) });
+      if (r.renamed) alert("已改名，引用该用户的数据库已自动同步。");
+    } else {
+      await api("api/users", { method: "POST", body: JSON.stringify(data) });
+    }
+    closeUserModal();
+    await loadUsers();
+  } catch (e) { $("userFormError").textContent = e.message; }
+}
+
+async function removeUser(name) {
+  const u = users.find(x => x.name === name);
+  const refs = (u && u.references) || [];
+  let ok = confirm(`确定删除用户「${name}」吗？`);
+  if (!ok) return;
+  if (refs.length) {
+    ok = confirm(`⚠️ 该用户正被 ${refs.length} 个数据库引用（${refs.join("、")}）。\n` +
+                 "这些引用会被清空，对应数据库将立即无法连接，需要重新指定用户。仍然删除？");
+    if (!ok) return;
+  }
+  try {
+    await api("api/users/" + encodeURIComponent(name) +
+              (refs.length ? "?force=true" : ""), { method: "DELETE" });
+    await loadUsers();
+  } catch (e) { alert("删除失败：" + e.message); }
+}
+
+async function migrateUsers() {
+  if (!confirm("将把各数据库中仍在使用内联账号的配置迁移为用户，并改为引用。已引用用户的数据库不受影响。确定继续？")) return;
+  try {
+    const r = await api("api/users/migrate", { method: "POST", body: JSON.stringify({}) });
+    await loadUsers();
+    alert(`迁移完成：新建 ${r.created.length} 个用户，复用 ${r.updated.length} 处。` +
+          (r.skipped ? `\n${r.skipped} 个数据库未迁移（无内联账号）。` : ""));
+  } catch (e) { alert("迁移失败：" + e.message); }
 }
 
 /* ---------- 写操作审计 ---------- */
@@ -367,6 +537,10 @@ function openModal(alias) {
   $("f_write_pass").placeholder = passPh;
   $("detailsSsh").open = false;
   $("f_db_type").value = "mysql";
+  const readRef = alias ? ((dbs.databases[alias] || {}).read_user_ref || null) : null;
+  const writeRef = alias ? ((dbs.databases[alias] || {}).write_user_ref || null) : null;
+  const readMode = readRef || (alias && (dbs.databases[alias] || {}).read_user && (dbs.databases[alias].read_user.user) ? INLINE_OPTION : "");
+  const writeMode = writeRef || (alias && (dbs.databases[alias] || {}).write_user && (dbs.databases[alias].write_user.user) ? INLINE_OPTION : "");
   if (alias) {
     const d = dbs.databases[alias] || {};
     $("f_alias").value = alias;
@@ -392,6 +566,11 @@ function openModal(alias) {
     $("f_ssh_key_path").value = s.key_path || "";
     $("detailsSsh").open = !!s.enable || d.query_timeout != null || d.pool_size != null;
   }
+  renderUserOptions();
+  $("f_read_user_ref").value = readMode;
+  $("f_write_user_ref").value = writeMode;
+  toggleInline("readInlineBox", readMode);
+  toggleInline("writeInlineBox", writeMode);
   $("modalMask").classList.remove("hidden");
 }
 
@@ -407,6 +586,13 @@ function collectForm() {
     return Number.isFinite(n) ? n : v;  // 非法值交给后端返回 400 中文提示
   };
   const dbType = $("f_db_type").value || "mysql";
+  // 账号来源二选一：选中用户 → read_user_ref；选中「内联」→ read_user 自带账号密码
+  const account = prefix => {
+    const ref = $("f_" + prefix + "_user_ref").value;
+    if (ref && ref !== INLINE_OPTION) return { ref, inline: { user: "", password: "" } };
+    return { ref: null, inline: { user: val("f_" + prefix + "_user"), password: $("f_" + prefix + "_pass").value } };
+  };
+  const readAcct = account("read"), writeAcct = account("write");
   return {
     alias: val("f_alias"),
     db_type: dbType,
@@ -415,8 +601,10 @@ function collectForm() {
     database: val("f_database") || null,
     charset: val("f_charset") || "utf8mb4",
     projects: val("f_projects") ? val("f_projects").split(/[,，\s]+/).filter(Boolean) : [],
-    read_user: { user: val("f_read_user"), password: $("f_read_pass").value },
-    write_user: { user: val("f_write_user"), password: $("f_write_pass").value },
+    read_user_ref: readAcct.ref,
+    write_user_ref: writeAcct.ref,
+    read_user: readAcct.inline,
+    write_user: writeAcct.inline,
     write_policy: $("f_write_policy").value,
     allow_delete: $("f_allow_delete").checked,
     allow_ddl: $("f_allow_ddl").checked,
@@ -559,7 +747,18 @@ $("btnTestRead").onclick = async () => {
   } catch (e) { $("formError").textContent = e.message; }
 };
 
+/* ---------- 用户管理事件 ---------- */
+$("f_read_user_ref").onchange = e => toggleInline("readInlineBox", e.target.value);
+$("f_write_user_ref").onchange = e => toggleInline("writeInlineBox", e.target.value);
+$("btnAddUser").onclick = () => openUserModal(null);
+$("btnUserCancel").onclick = closeUserModal;
+$("userMask").onclick = e => { if (e.target === $("userMask")) closeUserModal(); };
+$("btnUserSave").onclick = saveUser;
+$("btnMigrateUsers").onclick = migrateUsers;
+
 loadDbs().catch(e => { $("dbList").innerHTML = '<p class="empty">加载失败：' + esc(e.message) + "</p>"; });
+loadUsers().catch(e => { $("userBody").innerHTML = "";
+  $("userEmpty").style.display = ""; $("userEmpty").textContent = "用户加载失败：" + e.message; });
 loadAudit().catch(e => { $("auditEmpty").textContent = "加载失败：" + e.message; });
 loadErrors().catch(e => { $("errorEmpty").textContent = "加载失败：" + e.message; });
 </script>
